@@ -12,7 +12,12 @@ First, if you haven't already, install uv:
 pip install uv
 ```
 
-Next, navigate to your project directory and install the dependencies:
+Next, intall the dependencies from the pyproject.toml file:
+
+```bash
+pip install .
+```
+
 
 (Optional) Lock the dependencies and install them by using the CLI command:
 
@@ -22,7 +27,7 @@ crewai install
 
 ### Customizing
 
-**Add your `OPENAI_API_KEY` into the `.env` file**
+**Add your `OPENAI_API_KEY`, `QDRANT_COLLECTION_NAME`, `QDRANT_URL`, and `QDRANT_API_KEY` into the `.env` file**
 
 - Modify `src/contract_analysis/config/agents.yaml` to define your agents
 - Modify `src/contract_analysis/config/tasks.yaml` to define your tasks

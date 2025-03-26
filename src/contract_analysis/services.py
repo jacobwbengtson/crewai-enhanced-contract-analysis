@@ -7,6 +7,7 @@ import uuid
 import numpy as np
 from typing import List, Dict
 import re
+import tiktoken
 
 import openai
 from crewai.llm import LLM
@@ -158,7 +159,7 @@ class ContractsService:
         )
 
     def _combine_sentences(
-        self, sentences: List[Dict], buffer_size: int = 3
+        self, sentences: List[Dict], buffer_size: int = 2
     ) -> List[Dict]:
         """Combines sentences with surrounding context buffer."""
         for i in range(len(sentences)):
@@ -171,7 +172,7 @@ class ContractsService:
 
             # Add current sentence
             combined_sentence += sentences[i]["sentence"]
-
+            breakpoint
             # Add following sentences
             for j in range(i + 1, i + 1 + buffer_size):
                 if j < len(sentences):
@@ -209,14 +210,21 @@ class ContractsService:
         # Combine sentences with context
         sentences = self._combine_sentences(sentences)
 
-        # Get embeddings
-        embeddings = self.openai_client.embeddings.create(
-            model=self.embedding_model,
-            input=[x["combined_sentence"] for x in sentences],
-        )
-
-        for i, sentence in enumerate(sentences):
-            sentence["combined_sentence_embedding"] = embeddings.data[i].embedding
+        # Token trimming for combined sentences
+        tokenizer = tiktoken.encoding_for_model(self.embedding_model)
+        max_tokens = 8192
+        for sentence in sentences:
+            tokens = tokenizer.encode(sentence["combined_sentence"])
+            if len(tokens) > max_tokens:
+                sentence["combined_sentence"] = tokenizer.decode(tokens[:max_tokens])
+        
+        # Get embeddings (one at a time)
+        for sentence in sentences:
+            embedding_response = self.openai_client.embeddings.create(
+                model=self.embedding_model,
+                input=sentence["combined_sentence"]
+            )
+            sentence["combined_sentence_embedding"] = embedding_response.data[0].embedding
 
         # Calculate distances and find breakpoints
         distances, sentences = self._calculate_cosine_distances(sentences)
@@ -304,7 +312,7 @@ class ContractsService:
         prompt = f"""
         You are a contract classifier expert.
         You are given a contract.
-        You need to classify the contract into one of the following categories:
+        Your ONLY job is to classify the contract into one of the following categories:
         - Affiliate Agreement
         - Co-Branding
         - Development
@@ -327,6 +335,7 @@ class ContractsService:
         - Strategic Alliance
         - Supply
         - Transportation
+        - Farmout Agreement
 
         It's imperative that:
         1. You only return the category name
@@ -340,6 +349,15 @@ class ContractsService:
         result_dict = json.loads(result)
         print(f">>>> Document classified as {result_dict['category']}")
         return result_dict
+    
+    def process_single_contract(self, file_path: str):
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            md5 = hashlib.md5(f.read()).hexdigest()
+        points = self._process_contract(file_path, filename, md5)
+#        if points:
+#            self.vector_client.upsert(collection_name=self.qdrant_collection_name, points=points)
+
 
 
 if __name__ == "__main__":
