@@ -1,4 +1,4 @@
-name: Agentic Real-Time Well Monitoring
+name: Agentic Contract analysis
 description: "This AMP is a basic starting point for building Agentic AI Tools to monitor gas and oil sites and wells.  
 Providing manuals and other materials to the AI can help further make it's responses more intelligent and beneficial to 
 to helping reduce failures and costs associated with those unforseen failures."
@@ -22,7 +22,7 @@ tasks:
   - type: create_job
     name: Install dependencies
     entity_label: install_deps
-    script: 0_install-deps/requirements_installer.py
+    script: 01_install/requirements_installer.py
     arguments: None
     cpu: 4
     memory: 16
@@ -37,11 +37,11 @@ tasks:
       Running the job to install dependencies.  Note that this requires at least 2GB of memory
 
   - type: start_application
-    name: Agentic Real-Time Well Monitor
+    name: Agentic Contract Analysis App
     short_summary: Creates an application to serve the backend application.
     long_summary: Creates an application to serve the backend application.
     subdomain: IntelligentOwl
-    script: app_startup.py
+    script: 02_application/app_startup.py
     cpu: 4
     memory: 8
     environment_variables:
