@@ -64,7 +64,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Import from main.py - updated to use OpenAIDocumentProcessor instead of OllamaDocumentProcessor
 from main import OpenAIDocumentProcessor, ChromaDBStorage, process_documents
 
 # Define the path to store uploaded contracts
