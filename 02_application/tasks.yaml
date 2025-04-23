@@ -1,0 +1,107 @@
+analyze_document:
+  agent: legal_analyzer
+  context:
+    analysis_depth: detailed
+  description: Conduct a {analysis_depth} legal analysis of the document with ID {doc_id}.
+    Identify key legal provisions, obligations, rights, liabilities, and legal risks.
+  expected_output: Legal analysis report with key provisions, obligations, rights, and potential legal issues
+
+compare_documents:
+  agent: document_comparer
+  context:
+    focus_areas:
+    - legal provisions
+    - obligations
+    - rights
+    - definitions
+    - liability clauses
+    - termination clauses
+  description: Compare the legal aspects of documents with IDs {doc_ids}, focusing on {focus_areas}.
+    Identify conflicting legal terms and differences in legal obligations.
+  expected_output: Legal comparison report highlighting key legal similarities and differences
+
+list_documents:
+  agent: document_processor
+  context: {}
+  description: List all legal documents in the vector database.
+  expected_output: A list of all documents with their IDs and sources
+
+process_document:
+  agent: document_processor
+  context: {}
+  description: Process the legal document with ID {doc_id} and prepare it for legal analysis.
+  expected_output: Processed document with extracted text and legal metadata
+
+summarize_document:
+  agent: document_summarizer
+  context:
+    max_length: 2500
+  description: Summarize the legal document with ID {doc_id}, focusing on the most important
+    legal information. Highlight key legal provisions, rights, and obligations.
+    Keep the summary concise with a maximum length of {max_length} words.
+  expected_output: Concise legal summary highlighting key legal provisions and information
+
+# New legal-specific tasks
+review_contract:
+  agent: contract_reviewer
+  context:
+    review_focus:
+    - obligations
+    - liabilities
+    - termination
+    - indemnification
+    - warranties
+  description: Review the contract with ID {doc_id}, focusing on {review_focus}.
+    Identify potential legal risks and unbalanced provisions.
+  expected_output: Contract review report with identified legal risks and recommendations
+
+check_legal_compliance:
+  agent: legal_compliance_checker
+  context:
+    regulatory_areas:
+    - data privacy
+    - consumer protection
+    - employment
+    - intellectual property
+  description: Check the document with ID {doc_id} for compliance with regulations in {regulatory_areas}.
+    Identify potential compliance issues and gaps.
+  expected_output: Compliance assessment report with identified issues and recommendations
+
+extract_legal_definitions:
+  agent: legal_terminology_extractor
+  context: {}
+  description: Extract and explain all defined legal terms from the document with ID {doc_id}.
+    Identify inconsistencies in definitions and potential legal ambiguities.
+  expected_output: Glossary of legal terms with explanations and identified issues
+
+assess_legal_risks:
+  agent: legal_risk_assessor
+  context:
+    risk_categories:
+    - contractual
+    - regulatory
+    - litigation
+    - intellectual property
+  description: Assess the legal risks in the document with ID {doc_id}, categorizing them by {risk_categories}.
+    Provide a risk rating and potential mitigation strategies.
+  expected_output: Legal risk assessment report with risk ratings and mitigation recommendations
+
+compare_contract_terms:
+  agent: contract_reviewer
+  context:
+    term_categories:
+    - payment terms
+    - limitation of liability
+    - warranties
+    - termination rights
+    - intellectual property
+  description: Compare specific contract terms in documents with IDs {doc_ids}, focusing on {term_categories}.
+    Identify which document has more favorable terms for each category.
+  expected_output: Contract terms comparison report with recommendations
+
+identify_governing_law:
+  agent: legal_analyzer
+  context: {}
+  description: Identify and analyze the governing law and jurisdiction clauses in the document with ID {doc_id}.
+    Assess potential impact of jurisdiction on enforceability and interpretation.
+  expected_output: Analysis of governing law provisions and jurisdictional implications
