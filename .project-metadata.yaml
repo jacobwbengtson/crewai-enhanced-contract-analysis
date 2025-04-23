@@ -20,7 +20,7 @@ tasks:
   - type: create_job
     name: Install dependencies
     entity_label: install_deps
-    script: /home/cdsw/0_install/deps_installer.py
+    script: /home/cdsw/01_install/deps_installer.py
     arguments: None
     cpu: 4
     memory: 16
