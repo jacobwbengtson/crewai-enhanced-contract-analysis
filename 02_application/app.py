@@ -52,9 +52,8 @@ import threading
 import matplotlib.pyplot as plt
 import re
 from dotenv import load_dotenv
-
-sys.path.append('/home/cdsw/02_application/main.py')
 from main import OpenAIDocumentProcessor, ChromaDBStorage, process_documents
+
 # Load environment variables from .env file if present
 load_dotenv()
 
