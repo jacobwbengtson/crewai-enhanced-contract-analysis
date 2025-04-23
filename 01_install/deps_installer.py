@@ -48,7 +48,7 @@ def install_requirements():
     """
     try:
         print("Installing requirements...")
-        subprocess.check_call(['pip', 'install', '-r', '/home/cdsw/0_install/requirements.txt'], shell=False)
+        subprocess.check_call(['pip', 'install', '-r', 'requirements.txt'], shell=False)
         print("Requirements installed successfully!")
     except Exception as e:
         print(f"Error installing requirements: {e}")

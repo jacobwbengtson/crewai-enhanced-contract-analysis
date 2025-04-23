@@ -12,7 +12,7 @@ environment_variables:
       description: "OpenAI API Key for LLM Calls"
 
 runtimes:
-  - editor: Jupyterlab
+  - editor: JupyterLab
     kernel: Python 3.12
     edition: Standard
 
@@ -20,7 +20,7 @@ tasks:
   - type: create_job
     name: Install dependencies
     entity_label: install_deps
-    script: /home/cdsw/0_install/cloudera_FSI_installer.py
+    script: 0_install/deps_installer.py
     arguments: None
     cpu: 4
     memory: 16
