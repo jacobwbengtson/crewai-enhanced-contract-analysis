@@ -1,62 +1,124 @@
-# Contract Analysis Crew Template
+# Legal Document Analysis System
 
-Welcome to the AnalyzingContractClausesForConflictsAndSimilarities Crew project, powered by [crewAI](https://crewai.com). This template is designed to help you set up a multi-agent AI system with ease, leveraging the powerful and flexible framework provided by crewAI. Our goal is to enable your agents to collaborate effectively on complex tasks, maximizing their collective intelligence and capabilities.
+A powerful AI-driven tool for analyzing, comparing, and managing legal documents using OpenAI's GPT models.
+
+## Features
+
+- **Document Processing**: Upload and process legal documents (PDF, DOCX, TXT)
+- **Legal Analysis**: Generate summaries, analyze provisions, extract definitions
+- **Risk Assessment**: Identify and visualize legal risks in documents
+- **Document Comparison**: Compare multiple documents to identify similarities and differences
+- **Vector Search**: Find similar documents or passages using semantic search
+- **Customizable AI Backend**: Configure OpenAI API settings or use compatible alternatives
 
 ## Installation
 
-Ensure you have Python >=3.10 <=3.13 installed on your system. This project uses [UV](https://docs.astral.sh/uv/) for dependency management and package handling, offering a seamless setup and execution experience.
+1. Clone this repository
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+3. Set up your OpenAI API key (see Configuration section)
+4. Run the application:
+   ```
+   streamlit run app.py
+   ```
 
-First, if you haven't already, install uv:
+## Configuration
 
-```bash
-pip install uv
-```
+### Environment Variables
 
-Next, intall the dependencies from the pyproject.toml file:
+You can set configuration using environment variables or a `.env` file:
 
-```bash
-pip install .
-```
+1. Create a `.env` file in the project root (use `sample.env` as a template)
+2. Add your OpenAI API key:
+   ```
+   OPENAI_API_KEY=your_api_key_here
+   ```
+3. (Optional) Customize API endpoint or model:
+   ```
+   OPENAI_API_BASE=https://your-custom-endpoint.com/v1
+   OPENAI_API_MODEL=gpt-4o-latest
+   ```
 
+### API Settings Tab
 
-(Optional) Lock the dependencies and install them by using the CLI command:
+The application includes an API Settings tab where you can configure:
 
-```bash
-crewai install
-```
+- **API Key**: Set your OpenAI API key for the current session
+- **API Endpoint**: Change the API endpoint URL (for custom deployments or compatible APIs)
+- **Model Selection**: Choose from available models or specify a custom model
 
-### Customizing
+These settings can be adjusted at runtime without restarting the application.
 
-**Add your `OPENAI_API_KEY`, `QDRANT_COLLECTION_NAME`, `QDRANT_URL`, and `QDRANT_API_KEY` into the `.env` file**
+## Usage
 
-- Modify `src/contract_analysis/config/agents.yaml` to define your agents
-- Modify `src/contract_analysis/config/tasks.yaml` to define your tasks
-- Modify `src/contract_analysis/crew.py` to add your own logic, tools and specific args
-- Modify `src/contract_analysis/main.py` to add custom inputs for your agents and tasks
+### Document Processing
 
-## Running the Project
+1. Upload one or more legal documents using the file uploader in the sidebar
+2. Click "Process Legal Documents" to analyze the documents
+3. View the summary and analysis in the main interface
 
-To kickstart your crew of AI agents and begin task execution, run this from the root folder of your project:
+### Legal Analysis
 
-```bash
-$ crewai run
-```
+Each processed document includes several analysis tabs:
 
-This command initializes the contract_analysis Crew, assembling the agents and assigning them tasks as defined in your configuration.
+- **Summary & Analysis**: Overview of the document and key legal elements
+- **Legal Provisions**: Extraction of obligations, rights, and key provisions
+- **Legal Definitions**: Formal terms defined in the document
+- **Risk Assessment**: Identification and visualization of legal risks
+- **Similar Documents**: Documents with similar content in the database
 
-This example, unmodified, will run the create a `report.md` file with the output of a research on LLMs in the root folder.
+### Search
 
-## Understanding Your Crew
+Use the search functionality in the sidebar to find relevant documents or passages based on semantic similarity.
 
-The contract_analysis Crew is composed of multiple AI agents, each with unique roles, goals, and tools. These agents collaborate on a series of tasks, defined in `config/tasks.yaml`, leveraging their collective skills to achieve complex objectives. The `config/agents.yaml` file outlines the capabilities and configurations of each agent in your crew.
+### Document Database
 
-## Support
+The Document Database tab provides access to all processed documents in the system and allows batch processing of documents in the `contracts` folder.
 
-For support, questions, or feedback regarding the AnalyzingContractClausesForConflictsAndSimilarities Crew or crewAI.
+## Advanced Configuration
 
-- Visit our [documentation](https://docs.crewai.com)
-- Reach out to us through our [GitHub repository](https://github.com/joaomdmoura/crewai)
-- [Join our Discord](https://discord.com/invite/X4JWnZnxPb)
-- [Chat with our docs](https://chatg.pt/DWjSBZn)
+### Custom API Endpoints
 
-Let's create wonders together with the power and simplicity of crewAI.
+You can use alternative API endpoints compatible with the OpenAI API format:
+
+1. Self-hosted models (e.g., LiteLLM, OpenAI-compatible servers)
+2. Enterprise deployments with custom endpoints
+3. Azure OpenAI Service with appropriate configuration
+
+### Model Selection
+
+The application supports various OpenAI models:
+
+- `gpt-4o-latest`: Latest GPT-4o model (recommended)
+- `gpt-4o`: GPT-4o model
+- `gpt-4-turbo`: GPT-4 Turbo model
+- `gpt-4`: GPT-4 model
+- `gpt-3.5-turbo`: GPT-3.5 Turbo model
+
+You can also specify custom model identifiers for compatible deployments.
+
+## Troubleshooting
+
+### API Connection Issues
+
+If you experience issues connecting to the API:
+
+1. Verify your API key is correct
+2. Check that your API endpoint URL is properly formatted and accessible
+3. Ensure the selected model is available in your OpenAI subscription or endpoint
+4. Check the system messages section for detailed error information
+
+### Processing Errors
+
+If document processing fails:
+
+1. Check if the file format is supported (PDF, DOCX, TXT)
+2. Ensure the document is not corrupted or password-protected
+3. For large documents, try processing in smaller chunks
+4. Check system messages for specific error details
+
+## License
+
+This project is licensed under the Apache 2.0 License - see the LICENSE file for details.

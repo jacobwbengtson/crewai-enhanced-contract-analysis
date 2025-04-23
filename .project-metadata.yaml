@@ -1,0 +1,46 @@
+name: Agentic Contract Analysis
+description: "This AMP is a basic starting point for building Agentic AI Tools to analyze contracts.  
+This allows for the streamlining of the contract processing and review process."
+author: "Michael Schuler"
+specification_version: 1.0
+prototype_version: 1.0
+date: "2025-04-23"
+
+environment_variables:
+    OPENAI_API_KEY:
+      default: ""
+      description: "OpenAI API Key for LLM Calls"
+
+runtimes:
+  - editor: Jupyterlab
+    kernel: Python 3.12
+    edition: Standard
+
+tasks:
+  - type: create_job
+    name: Install dependencies
+    entity_label: install_deps
+    script: 0_install/cloudera_FSI_installer.py
+    arguments: None
+    cpu: 4
+    memory: 16
+    short_summary: Create job to install project dependencies.
+    environment:
+      TASK_TYPE: CREATE/RUN_JOB
+
+  - type: run_job
+    entity_label: install_deps
+    short_summary: Running install dependencies job.
+    long_summary: >-
+      Running the job to install dependencies.  Note that this requires at least 2GB of memory
+
+  - type: start_application
+    name: Agentic Real-Time Well Monitor
+    short_summary: Creates the Legal Contract Application
+    long_summary: Creates the Legal Contract Application to analyze contracts.
+    subdomain: LegalEagle
+    script: run_apps.py
+    cpu: 4
+    memory: 8
+    environment_variables:
+      TASK_TYPE: START_APPLICATION
