@@ -35,7 +35,7 @@ tasks:
       Running the job to install dependencies.  Note that this requires at least 2GB of memory
 
   - type: start_application
-    name: Agentic Real-Time Well Monitor
+    name: Agentic Contract Analysis
     short_summary: Creates the Legal Contract Application
     long_summary: Creates the Legal Contract Application to analyze contracts.
     subdomain: LegalEagle
