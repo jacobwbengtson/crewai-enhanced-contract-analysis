@@ -68,8 +68,8 @@ st.set_page_config(
 
 
 # Define the path to store uploaded contracts
-UPLOAD_FOLDER = "/home/cdsw/02_application/contracts"
-RESULTS_FOLDER = "/home/cdsw/02_application/results"
+UPLOAD_FOLDER = "./contracts"
+RESULTS_FOLDER = "./results"
 
 # Ensure directories exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
