@@ -51,7 +51,7 @@ def start_streamlit():
     port = int(os.getenv('CDSW_READONLY_PORT'))
 
     # Get the path to the main app file
-    app_path = "/home/cdsw/2_application/app.py"
+    app_path = "/home/cdsw/02_application/app.py"
 
     # Set environment variables for Streamlit
     env = os.environ.copy()

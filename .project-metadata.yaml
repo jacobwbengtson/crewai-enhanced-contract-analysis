@@ -38,7 +38,7 @@ tasks:
     short_summary: Creates the Legal Contract Application
     long_summary: Creates the Legal Contract Application to analyze contracts.
     subdomain: LegalEagle
-    script: run_apps.py
+    script: 02_application/startup.py
     cpu: 4
     memory: 8
     environment_variables:
