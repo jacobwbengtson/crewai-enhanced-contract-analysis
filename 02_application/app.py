@@ -52,7 +52,7 @@ import threading
 import matplotlib.pyplot as plt
 import re
 from dotenv import load_dotenv
-from .main import OpenAIDocumentProcessor, ChromaDBStorage, process_documents
+from main import OpenAIDocumentProcessor, ChromaDBStorage, process_documents
 # Load environment variables from .env file if present
 load_dotenv()
 
