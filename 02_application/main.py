@@ -55,7 +55,7 @@ from langchain_openai import ChatOpenAI
 class ChromaDBStorage:
     """Storage for document chunks and summaries in ChromaDB."""
 
-    def __init__(self, db_path: str = "/home/cdsw/02_applicaton/chromadb", chunks_collection: str = "document_chunks",
+    def __init__(self, db_path: str = "/home/cdsw/02_application/chromadb", chunks_collection: str = "document_chunks",
                  summaries_collection: str = "document_summaries"):
         """Initialize ChromaDB storage."""
         print(f"Initializing ChromaDB storage at {os.path.abspath(db_path)}")
@@ -226,8 +226,8 @@ class CrewAIDocumentProcessor:
                  api_key: str = None,
                  base_url: str = "https://api.openai.com/v1",
                  model: str = "gpt-4o",
-                 agents_yaml_path: str = "agents.yaml",
-                 tasks_yaml_path: str = "tasks.yaml"):
+                 agents_yaml_path: str = "/home/cdsw/02_applicatoin/agents.yaml",
+                 tasks_yaml_path: str = "/home/cdsw/02_applicatoin/tasks.yaml"):
         """Initialize CrewAI document processor."""
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = base_url
@@ -1159,7 +1159,7 @@ def process_documents():
             all_results[doc_id] = results
 
             # Save results to file
-            results_folder = "results"
+            results_folder = "/home/cdsw/02_application/results"
             if not os.path.exists(results_folder):
                 print(f"Creating results folder: {results_folder}")
                 os.makedirs(results_folder)

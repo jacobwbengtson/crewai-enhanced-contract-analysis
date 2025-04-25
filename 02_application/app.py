@@ -58,7 +58,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
 sys.path.append(('/home/cdsw/02_application/main.py'))
-from main import ChromaDBStorage, process_documents, get_document_processor
+from main import ChromaDBStorage, process_documents, get_document_processor, summarize_document,
 
 # Set page config first - must be the first Streamlit command
 st.set_page_config(
