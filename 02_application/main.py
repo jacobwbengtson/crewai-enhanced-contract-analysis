@@ -226,8 +226,8 @@ class CrewAIDocumentProcessor:
                  api_key: str = None,
                  base_url: str = "https://api.openai.com/v1",
                  model: str = "gpt-4o",
-                 agents_yaml_path: str = "/home/cdsw/02_applicatoin/agents.yaml",
-                 tasks_yaml_path: str = "/home/cdsw/02_applicatoin/tasks.yaml"):
+                 agents_yaml_path: str = "/home/cdsw/02_application/agents.yaml",
+                 tasks_yaml_path: str = "/home/cdsw/02_application/tasks.yaml"):
         """Initialize CrewAI document processor."""
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = base_url
