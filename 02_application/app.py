@@ -51,16 +51,14 @@ import sys
 import threading
 import matplotlib.pyplot as plt
 import re
-import yaml
-from dotenv import load_dotenv
-from main import OpenAIDocumentProcessor, ChromaDBStorage, process_documents
-
-# Import CrewAI components
-from crewai import Agent, Task, Crew, LLM
-from typing import Dict, Any, List
-
-# Load environment variables from .env file if present
-load_dotenv()
+import json
+from crewai import Agent, Task, Crew, Process
+from langchain_openai import ChatOpenAI
+import logging
+logging.basicConfig(level=logging.INFO)
+os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
+sys.path.append(('/home/cdsw/02_application/main.py'))
+from main import ChromaDBStorage, process_documents, get_document_processor
 
 # Set page config first - must be the first Streamlit command
 st.set_page_config(
@@ -70,13 +68,19 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Import from main.py
+
+
 # Define the path to store uploaded contracts
-UPLOAD_FOLDER = "contracts"
-RESULTS_FOLDER = "results"
+UPLOAD_FOLDER = "/home/cdsw/02_application/contracts"
+RESULTS_FOLDER = "/home/cdsw/02_application/results"
 
 # Ensure directories exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
+
+# Add global variable to track if API key is configured
+api_key_configured = False
 
 # Initialize session state
 if 'processed_doc' not in st.session_state:
@@ -95,26 +99,12 @@ if 'similarity_threshold' not in st.session_state:
     st.session_state.similarity_threshold = 0.5
 if 'max_similar_docs' not in st.session_state:
     st.session_state.max_similar_docs = 5
-
-# Initialize API settings in session state with values from environment if available
-if 'api_endpoint' not in st.session_state:
-    st.session_state.api_endpoint = os.environ.get('OPENAI_API_BASE', "https://api.openai.com/v1")
-if 'api_model' not in st.session_state:
-    st.session_state.api_model = os.environ.get('OPENAI_API_MODEL', "gpt-4o-latest")
-
-# Initialize CrewAI settings in session state
-if 'crewai_enabled' not in st.session_state:
-    st.session_state.crewai_enabled = False
-if 'crewai_model' not in st.session_state:
-    st.session_state.crewai_model = "openai/gpt-4"
-if 'crewai_temperature' not in st.session_state:
-    st.session_state.crewai_temperature = 0.7
-if 'crewai_agents' not in st.session_state:
-    st.session_state.crewai_agents = {}
-if 'crewai_tasks' not in st.session_state:
-    st.session_state.crewai_tasks = {}
-if 'crewai_crew' not in st.session_state:
-    st.session_state.crewai_crew = None
+if 'openai_endpoint' not in st.session_state:
+    st.session_state.openai_endpoint = "https://api.openai.com/v1"
+if 'openai_api_key' not in st.session_state:
+    st.session_state.openai_api_key = ""
+if 'openai_model' not in st.session_state:
+    st.session_state.openai_model = "gpt-4o"
 
 # Initialize session state for status messages
 if 'status_messages' not in st.session_state:
@@ -130,128 +120,51 @@ def add_status_message(message, message_type="info"):
         "timestamp": timestamp
     })
 
+def ensure_string(obj):
+    """Convert an object to string if it's not a string already."""
+    if isinstance(obj, str):
+        return obj
+    elif hasattr(obj, '__str__'):
+        return str(obj)
+    else:
+        return f"[Object of type {type(obj).__name__}]"
 
-###########################################
-# CREWAI INTEGRATION
-###########################################
+def ensure_api_key():
+    """Ensure API key is set before processing documents."""
+    global api_key_configured
 
-def load_yaml_config(file_path):
-    """Load YAML configuration file."""
-    try:
-        with open(file_path, 'r') as file:
-            return yaml.safe_load(file)
-        return {}
-    except Exception as e:
-        add_status_message(f"Error loading YAML config {file_path}: {e}", "error")
-        return {}
+    # Set environment variable directly from session state
+    if st.session_state.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = st.session_state.openai_api_key
+        api_key_configured = True
+        return True
+    elif os.environ.get("OPENAI_API_KEY"):
+        api_key_configured = True
+        return True
+    else:
+        api_key_configured = False
+        return False
 
 
-def setup_crewai():
-    """Set up CrewAI agents and tasks from YAML configurations."""
-    if st.session_state.crewai_enabled:
+def handle_openai_error(func):
+    """Decorator to handle OpenAI errors gracefully."""
+
+    def wrapper(*args, **kwargs):
         try:
-            # Initialize LLM
-            llm = LLM(
-                model=st.session_state.crewai_model,
-                temperature=st.session_state.crewai_temperature
-            )
-
-            # Load agent and task configurations
-            agent_configs = load_yaml_config("agents.yaml")
-            task_configs = load_yaml_config("tasks.yaml")
-
-            if not agent_configs:
-                add_status_message("Failed to load agent configurations", "error")
-                return False
-
-            if not task_configs:
-                add_status_message("Failed to load task configurations", "error")
-                return False
-
-            # Create agents
-            agents = {}
-            for agent_id, config in agent_configs.items():
-                agent = Agent(
-                    role=config.get("role", f"Agent {agent_id}"),
-                    goal=config.get("goal", "Process legal documents"),
-                    backstory=config.get("backstory", "An expert in legal document analysis"),
-                    verbose=config.get("verbose", True),
-                    allow_delegation=config.get("allow_delegation", True),
-                    llm=llm
-                )
-                agents[agent_id] = agent
-
-            # Create tasks
-            tasks = {}
-            for task_id, config in task_configs.items():
-                agent_id = config.get("agent")
-                if agent_id not in agents:
-                    add_status_message(f"Agent {agent_id} not found for task {task_id}", "warning")
-                    continue
-
-                task = Task(
-                    description=config.get("description", f"Task {task_id}"),
-                    expected_output=config.get("expected_output", "Task output"),
-                    agent=agents[agent_id]
-                )
-
-                tasks[task_id] = task
-
-            # Save to session state
-            st.session_state.crewai_agents = agents
-            st.session_state.crewai_tasks = tasks
-
-            add_status_message("CrewAI setup completed successfully", "success")
-            return True
-
+            return func(*args, **kwargs)
+        except ValueError as e:
+            if "OpenAI API key" in str(e):
+                st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+                return None
+            else:
+                st.error(f"Error: {str(e)}")
+                return None
         except Exception as e:
-            add_status_message(f"Error setting up CrewAI: {e}", "error")
-            import traceback
-            add_status_message(traceback.format_exc(), "error")
-            return False
+            st.error(f"An error occurred: {str(e)}")
+            return None
 
-    return False
+    return wrapper
 
-
-def run_crewai_task(task_id, context=None):
-    """Run a CrewAI task with optional context."""
-    if task_id not in st.session_state.crewai_tasks:
-        return f"Task {task_id} not found"
-
-    task = st.session_state.crewai_tasks[task_id]
-
-    # Apply context to task description if provided
-    if context:
-        task_desc = task.description
-        try:
-            task.description = task_desc.format(**context)
-        except KeyError as e:
-            add_status_message(f"Missing context variable {e} for task {task_id}", "warning")
-
-    # Create and run a crew with just this task
-    crew = Crew(
-        agents=[task.agent],
-        tasks=[task],
-        verbose=True
-    )
-
-    # Run the crew
-    try:
-        result = crew.kickoff()
-        return result
-    except Exception as e:
-        error_msg = f"Error running CrewAI task {task_id}: {e}"
-        add_status_message(error_msg, "error")
-        return error_msg
-    finally:
-        # Restore original task description if modified
-        if context:
-            task.description = task_desc
-
-
-###########################################
-# HELPER FUNCTIONS
-###########################################
 
 def save_uploaded_file(uploaded_file):
     """Save an uploaded file to the contracts folder and return the file path."""
@@ -307,147 +220,84 @@ def clean_document_text(text, file_path):
     return text
 
 
+@handle_openai_error
 def process_document(file_path, original_filename):
-    """Process a legal document using either OpenAI or CrewAI."""
-    # Generate a unique document ID
-    doc_id = f"doc_{hashlib.md5(original_filename.encode()).hexdigest()[:8]}"
+    """Process a document using OpenAI."""
+    global api_key_configured
 
-    # Initialize storage
+    # Double check that API key is set
+    if not api_key_configured and not ensure_api_key():
+        st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+        return None
+
+    # Initialize ChromaDB storage
     chroma_storage = ChromaDBStorage(
-        db_path="./chromadb",
+        db_path="/home/cdsw/02_application/chromadb",
         chunks_collection="document_chunks",
         summaries_collection="document_summaries"
     )
 
-    # Check if using CrewAI
-    if st.session_state.crewai_enabled:
-        # First, make sure CrewAI is set up
-        if not st.session_state.crewai_agents:
-            setup_crewai()
+    # Generate a unique document ID
+    doc_id = f"doc_{hashlib.md5(original_filename.encode()).hexdigest()[:8]}"
 
-        if not st.session_state.crewai_agents:
-            add_status_message("CrewAI setup failed", "error")
-            return None
+    # Process the document
+    with st.spinner(f"Processing {original_filename}..."):
+        # Get the document processor
+        document_processor = get_document_processor()
+        processor_type = document_processor.__class__.__name__
+        print(f"Using document processor: {processor_type}")
 
-        # For now, use OpenAI processor to extract text and create chunks
-        # This could be replaced with a CrewAI task in the future
-        api_key = os.environ.get('OPENAI_API_KEY')
-        document_processor = OpenAIDocumentProcessor(
-            model_name=st.session_state.api_model,
-            max_length=5000,
-            api_key=api_key,
-            api_base=st.session_state.api_endpoint
+        processed_doc = document_processor.process_document(file_path, doc_id)
+
+        # Store chunks in ChromaDB
+        chroma_storage.add_texts(
+            processed_doc["chunks"],
+            processed_doc["metadatas"],
+            processed_doc["ids"]
         )
 
-        with st.spinner(f"Processing {original_filename} with CrewAI..."):
-            # First extract and chunk the document
-            processed_doc = document_processor.process_document(file_path, doc_id)
+        # Generate summary and analysis
+        summary = document_processor.summarize(processed_doc["text"])
+        analysis = document_processor.analyze(processed_doc["text"])
 
-            # Store chunks in ChromaDB
-            chroma_storage.add_texts(
-                processed_doc["chunks"],
-                processed_doc["metadatas"],
-                processed_doc["ids"]
-            )
-
-            # Use CrewAI tasks for summarization and analysis
-            context = {"doc_id": doc_id, "max_length": 2500}
-            summary = run_crewai_task("summarize_document", context)
-
-            context = {"doc_id": doc_id, "analysis_depth": "detailed"}
-            analysis = run_crewai_task("analyze_document", context)
-
-            # Store summary in ChromaDB
-            chroma_storage.add_summary(
-                doc_id=doc_id,
-                source=file_path,
-                filename=original_filename,
-                summary=summary,
-                analysis=analysis
-            )
-
-            # Save results to file
-            summary_file = os.path.join(RESULTS_FOLDER, f"{os.path.splitext(original_filename)[0]}_summary.txt")
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(f"Document: {original_filename}\n")
-                f.write(f"Processed as: {doc_id}\n\n")
-                f.write(f"SUMMARY:\n{summary}\n\n")
-                f.write(f"ANALYSIS:\n{analysis}")
-
-        return {
-            "doc_id": doc_id,
-            "filename": original_filename,
-            "file_path": file_path,
-            "summary": summary,
-            "analysis": analysis
-        }
-    else:
-        # Original method using OpenAI directly
-        # Check for OpenAI API key in environment variables
-        api_key = os.environ.get('OPENAI_API_KEY')
-        if not api_key:
-            st.warning(
-                "OpenAI API key not found. Please set the OPENAI_API_KEY environment variable or enter it in the API Settings tab.")
-
-        # Use custom API settings from session state
-        document_processor = OpenAIDocumentProcessor(
-            model_name=st.session_state.api_model,
-            max_length=5000,
-            api_key=api_key,
-            api_base=st.session_state.api_endpoint
+        # Store summary in ChromaDB
+        chroma_storage.add_summary(
+            doc_id=doc_id,
+            source=file_path,
+            filename=original_filename,
+            summary=summary,
+            analysis=analysis
         )
 
-        # Process the document
-        with st.spinner(f"Processing {original_filename}..."):
-            processed_doc = document_processor.process_document(file_path, doc_id)
+        # Save results to file
+        summary_file = os.path.join(RESULTS_FOLDER, f"{os.path.splitext(original_filename)[0]}_summary.txt")
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            f.write(f"Document: {original_filename}\n")
+            f.write(f"Processed as: {doc_id}\n\n")
+            f.write(f"SUMMARY:\n{summary}\n\n")
+            f.write(f"ANALYSIS:\n{analysis}")
 
-            # Store chunks in ChromaDB
-            chroma_storage.add_texts(
-                processed_doc["chunks"],
-                processed_doc["metadatas"],
-                processed_doc["ids"]
-            )
-
-            # Generate summary and analysis
-            summary = document_processor.summarize(processed_doc["text"])
-            analysis = document_processor.analyze(processed_doc["text"])
-
-            # Store summary in ChromaDB
-            chroma_storage.add_summary(
-                doc_id=doc_id,
-                source=file_path,
-                filename=original_filename,
-                summary=summary,
-                analysis=analysis
-            )
-
-            # Save results to file
-            summary_file = os.path.join(RESULTS_FOLDER, f"{os.path.splitext(original_filename)[0]}_summary.txt")
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(f"Document: {original_filename}\n")
-                f.write(f"Processed as: {doc_id}\n\n")
-                f.write(f"SUMMARY:\n{summary}\n\n")
-                f.write(f"ANALYSIS:\n{analysis}")
-
-        return {
-            "doc_id": doc_id,
-            "filename": original_filename,
-            "file_path": file_path,
-            "summary": summary,
-            "analysis": analysis
-        }
+    return {
+        "doc_id": doc_id,
+        "filename": original_filename,
+        "file_path": file_path,
+        "summary": summary,
+        "analysis": analysis
+    }
 
 
 def find_similar_documents(processed_doc, max_results=5, similarity_threshold=0.5):
     """Find similar legal documents to the processed document using vector similarity."""
     chroma_storage = ChromaDBStorage(
-        db_path="./chromadb",
+        db_path="/home/cdsw/02_application/chromadb",
         chunks_collection="document_chunks",
         summaries_collection="document_summaries"
     )
 
     # Get the summary text of the processed document to use as query
-    query_text = processed_doc["summary"]
+    # Convert CrewOutput to string if needed
+    summary = ensure_string(processed_doc["summary"])
+    query_text = summary
 
     # Search for similar summaries using vector similarity
     try:
@@ -492,11 +342,10 @@ def find_similar_documents(processed_doc, max_results=5, similarity_threshold=0.
 
     return similar_docs
 
-
 def get_document_summary(doc_id):
     """Get the summary for a legal document."""
     chroma_storage = ChromaDBStorage(
-        db_path="./chromadb",
+        db_path="/home/cdsw/02_application/chromadb",
         chunks_collection="document_chunks",
         summaries_collection="document_summaries"
     )
@@ -505,213 +354,290 @@ def get_document_summary(doc_id):
     return summary
 
 
+@handle_openai_error
+@handle_openai_error
 def compare_documents(new_doc, selected_docs):
-    """Compare the new legal document with selected documents."""
-    # Check if using CrewAI
-    if st.session_state.crewai_enabled:
-        # Get doc_ids for comparison
-        doc_ids = [new_doc["doc_id"]] + list(selected_docs.keys())
+    """Compare the new document with selected documents."""
+    # Double check that API key is set
+    if not api_key_configured and not ensure_api_key():
+        st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+        return None
 
-        # Format as comma-separated string for CrewAI task
-        doc_ids_str = ",".join(doc_ids)
+    # Get document processor
+    document_processor = get_document_processor()
 
-        # Set up focus areas
-        focus_areas = "legal provisions,obligations,rights,liability,termination,jurisdiction"
-
-        # Run the comparison task
-        with st.spinner("Comparing documents with CrewAI..."):
-            context = {
-                "doc_ids": doc_ids_str,
-                "focus_areas": focus_areas
-            }
-            result = run_crewai_task("compare_documents", context)
-            return result
-    else:
-        # Original OpenAI implementation
-        # Check for OpenAI API key in environment variables
-        api_key = os.environ.get('OPENAI_API_KEY')
-
-        # Use custom API settings from session state
-        document_processor = OpenAIDocumentProcessor(
-            model_name=st.session_state.api_model,
-            max_length=5000,
-            api_key=api_key,
-            api_base=st.session_state.api_endpoint
-        )
-
-        # Get text from the new document
+    # Get text from the new document
+    try:
         with open(new_doc["file_path"], 'r', encoding='utf-8', errors='ignore') as f:
             new_text = f.read()
 
-        # Get summaries for selected documents
-        summaries = []
-        for doc_id, summary in selected_docs.items():
-            # Parse the summary text
-            if isinstance(summary, dict) and "text" in summary:
-                summaries.append({
-                    "doc_id": doc_id,
-                    "text": summary["text"]
-                })
-            else:
-                # Try to extract from the raw text
-                parts = summary.split("SUMMARY:", 1)
-                if len(parts) > 1:
-                    summary_text = parts[1].split("ANALYSIS:", 1)[0].strip()
-                    analysis_text = parts[1].split("ANALYSIS:", 1)[1].strip() if "ANALYSIS:" in parts[1] else ""
+        # Debug info
+        print(f"Loaded text from {new_doc['file_path']}, length: {len(new_text)} chars")
+        print(f"Text preview: {new_text[:100]}...")
 
+        if len(new_text) < 10:
+            # Try with binary mode if text mode didn't work
+            with open(new_doc["file_path"], 'rb') as f:
+                binary_data = f.read()
+                new_text = binary_data.decode('utf-8', errors='ignore')
+                print(f"Loaded binary text, length: {len(new_text)} chars")
+    except Exception as e:
+        error_msg = f"Error reading file {new_doc['file_path']}: {e}"
+        print(error_msg)
+        return error_msg
+
+    # Check if we have text to compare
+    if not new_text or len(new_text) < 10:
+        return "Error: Could not extract meaningful text from the uploaded document. The file may be corrupted or in an unsupported format."
+
+    # Get summaries for selected documents
+    summaries = []
+    for doc_id, summary in selected_docs.items():
+        # Parse the summary text
+        if isinstance(summary, dict) and "text" in summary:
+            summaries.append({
+                "doc_id": doc_id,
+                "text": summary["text"]
+            })
+        else:
+            # Try to extract from the raw text
+            try:
+                if isinstance(summary, str):
+                    parts = summary.split("SUMMARY:", 1)
+                    if len(parts) > 1:
+                        summary_text = parts[1].split("ANALYSIS:", 1)[0].strip()
+                        analysis_text = parts[1].split("ANALYSIS:", 1)[1].strip() if "ANALYSIS:" in parts[1] else ""
+
+                        summaries.append({
+                            "doc_id": doc_id,
+                            "text": f"SUMMARY:\n{summary_text}\n\nANALYSIS:\n{analysis_text}"
+                        })
+                else:
+                    # Convert non-string summary to string
                     summaries.append({
                         "doc_id": doc_id,
-                        "text": f"SUMMARY:\n{summary_text}\n\nANALYSIS:\n{analysis_text}"
+                        "text": str(summary)
                     })
+            except Exception as e:
+                print(f"Error parsing summary for {doc_id}: {e}")
+                # Add with minimal text to avoid errors
+                summaries.append({
+                    "doc_id": doc_id,
+                    "text": f"Document ID: {doc_id}"
+                })
 
-        # Compare documents
-        comparison = document_processor.compare_with_summaries(
-            new_text,
-            summaries,
-            focus_areas=["legal provisions", "obligations", "rights", "liability", "termination", "jurisdiction"]
-        )
+    # Check if we have summaries to compare with
+    if not summaries:
+        return "Error: No document summaries found to compare with. Please select at least one document for comparison."
 
-        return comparison
+    # Compare documents
+    comparison_result = document_processor.compare_with_summaries(
+        new_text,
+        summaries,
+        focus_areas=["legal provisions", "obligations", "rights", "liability", "termination", "jurisdiction"]
+    )
 
+    # Convert CrewOutput to string if needed
+    if hasattr(comparison_result, '__str__'):
+        comparison_result = str(comparison_result)
 
+    # Check if the result looks like JSON and format it if needed
+    if isinstance(comparison_result, str) and (comparison_result.startswith('{') or comparison_result.startswith('[')):
+        try:
+            import json
+            # Try to parse it as JSON
+            data = json.loads(comparison_result)
+            # Format it into a more readable format
+            readable_result = format_comparison_json(data)
+            return readable_result
+        except json.JSONDecodeError:
+            # Not valid JSON, return as is
+            return comparison_result
+
+    return comparison_result
+
+def format_comparison_json(data):
+    """Format comparison JSON data into a readable string format."""
+    if isinstance(data, dict):
+        if "comparison" in data:
+            # Extract the main comparison
+            result = "# Document Comparison Results\n\n"
+
+            if "documents" in data:
+                result += "## Documents Compared\n\n"
+                for doc in data["documents"]:
+                    result += f"- {doc.get('name', 'Unnamed document')} (ID: {doc.get('id', 'Unknown')})\n"
+                result += "\n"
+
+            if "similarities" in data:
+                result += "## Similarities\n\n"
+                for item in data["similarities"]:
+                    result += f"- {item}\n"
+                result += "\n"
+
+            if "differences" in data:
+                result += "## Differences\n\n"
+                for item in data["differences"]:
+                    result += f"- {item}\n"
+                result += "\n"
+
+            if "analysis" in data:
+                result += "## Analysis\n\n"
+                result += data["analysis"]
+                result += "\n\n"
+
+            return result
+
+        # Generic dictionary formatting
+        result = ""
+        for key, value in data.items():
+            key_str = key.replace("_", " ").title()
+            result += f"## {key_str}\n\n"
+
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        for k, v in item.items():
+                            result += f"### {k.replace('_', ' ').title()}\n{v}\n\n"
+                    else:
+                        result += f"- {item}\n"
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    result += f"### {k.replace('_', ' ').title()}\n{v}\n\n"
+            else:
+                result += f"{value}\n\n"
+
+        return result
+
+    elif isinstance(data, list):
+        # Format list data
+        result = ""
+        for item in data:
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    result += f"### {key.replace('_', ' ').title()}\n{value}\n\n"
+            else:
+                result += f"- {item}\n"
+
+        return result
+
+    # Default fallback
+    return str(data)
+
+@handle_openai_error
 def extract_legal_definitions(doc_id):
     """Extract legal definitions from a document with improved accuracy."""
-    # Check if using CrewAI
-    if st.session_state.crewai_enabled:
-        with st.spinner("Extracting legal definitions with CrewAI..."):
-            context = {"doc_id": doc_id}
-            result = run_crewai_task("extract_legal_definitions", context)
-            return result
-    else:
-        # Original OpenAI implementation
-        # Check for OpenAI API key in environment variables
-        api_key = os.environ.get('OPENAI_API_KEY')
+    # Double check that API key is set
+    if not api_key_configured and not ensure_api_key():
+        st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+        return None
 
-        # Use custom API settings from session state
-        document_processor = OpenAIDocumentProcessor(
-            model_name=st.session_state.api_model,
-            max_length=5000,
-            api_key=api_key,
-            api_base=st.session_state.api_endpoint
-        )
+    # Get document processor
+    document_processor = get_document_processor()
 
-        chroma_storage = ChromaDBStorage(
-            db_path="./chromadb",
-            chunks_collection="document_chunks",
-            summaries_collection="document_summaries"
-        )
+    chroma_storage = ChromaDBStorage(
+        db_path="/home/cdsw/02_application/chromadb",
+        chunks_collection="document_chunks",
+        summaries_collection="document_summaries"
+    )
 
-        # Get the document text
-        if doc_id.startswith("doc_"):
-            # Get the document from the database
-            summary = chroma_storage.get_summary(doc_id)
-            if not summary:
-                return "Document not found in the database."
+    # Get the document text
+    if doc_id.startswith("doc_"):
+        # Get the document from the database
+        summary = chroma_storage.get_summary(doc_id)
+        if not summary:
+            return "Document not found in the database."
 
-            if "metadata" in summary and "source" in summary["metadata"]:
-                file_path = summary["metadata"]["source"]
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        raw_text = f.read()
+        if "metadata" in summary and "source" in summary["metadata"]:
+            file_path = summary["metadata"]["source"]
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    raw_text = f.read()
 
-                    # Clean the text of PDF artifacts
-                    cleaned_text = clean_document_text(raw_text, file_path)
+                # Clean the text of PDF artifacts
+                cleaned_text = clean_document_text(raw_text, file_path)
 
-                except Exception as e:
-                    return f"Error reading document: {e}"
-            else:
-                return "Document source file not found."
+            except Exception as e:
+                return f"Error reading document: {e}"
         else:
-            return "Invalid document ID."
+            return "Document source file not found."
+    else:
+        return "Invalid document ID."
 
-        # Extract legal definitions with improved prompt
-        # We're adding a try-except block here because the method may not exist in the imported class
-        try:
-            definitions = document_processor.extract_legal_definitions_improved(cleaned_text)
-        except AttributeError:
-            # Fall back to the regular method if the improved one doesn't exist
-            # Apply our own post-processing to filter PDF artifacts
-            definitions = document_processor.extract_legal_definitions(cleaned_text)
-            # Check if the result contains PDF metadata artifacts
-            pdf_artifacts = [
-                "CIDSystemInfo", "CMapName", "CMapType", "CIDToGIDMap",
-                "obj", "R", "def", "endobj", "stream", "endstream"
-            ]
+    # Extract legal definitions
+    try:
+        definitions = document_processor.extract_legal_definitions_improved(cleaned_text)
+    except AttributeError:
+        # Fall back to the regular method if the improved one doesn't exist
+        # Apply our own post-processing to filter PDF artifacts
+        definitions = document_processor.extract_legal_definitions(cleaned_text)
+        # Check if the result contains PDF metadata artifacts
+        pdf_artifacts = [
+            "CIDSystemInfo", "CMapName", "CMapType", "CIDToGIDMap",
+            "obj", "R", "def", "endobj", "stream", "endstream"
+        ]
 
-            # Check for PDF artifacts in the definitions
-            contains_artifacts = any(artifact in definitions for artifact in pdf_artifacts)
+        # Check for PDF artifacts in the definitions
+        contains_artifacts = any(artifact in definitions for artifact in pdf_artifacts)
 
-            if contains_artifacts:
-                # If PDF artifacts are detected, replace the entire output with a clearer message
-                definitions = "No formal legal definitions were found in this document. The extracted text appears to contain technical metadata rather than legal content."
+        if contains_artifacts:
+            # If PDF artifacts are detected, replace the entire output with a clearer message
+            definitions = "No formal legal definitions were found in this document. The extracted text appears to contain technical metadata rather than legal content."
 
-        return definitions
+    return definitions
 
 
+@handle_openai_error
 def assess_legal_risks(doc_id):
     """Perform a legal risk assessment on a document."""
-    # Check if using CrewAI
-    if st.session_state.crewai_enabled:
-        with st.spinner("Assessing legal risks with CrewAI..."):
-            context = {
-                "doc_id": doc_id,
-                "risk_categories": "contractual,regulatory,litigation,intellectual property"
-            }
-            result = run_crewai_task("assess_legal_risks", context)
-            return result
-    else:
-        # Original OpenAI implementation
-        # Check for OpenAI API key in environment variables
-        api_key = os.environ.get('OPENAI_API_KEY')
+    # Double check that API key is set
+    if not api_key_configured and not ensure_api_key():
+        st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+        return None
 
-        # Use custom API settings from session state
-        document_processor = OpenAIDocumentProcessor(
-            model_name=st.session_state.api_model,
-            max_length=5000,
-            api_key=api_key,
-            api_base=st.session_state.api_endpoint
-        )
+    # Get document processor
+    document_processor = get_document_processor()
 
-        chroma_storage = ChromaDBStorage(
-            db_path="./chromadb",
-            chunks_collection="document_chunks",
-            summaries_collection="document_summaries"
-        )
+    chroma_storage = ChromaDBStorage(
+        db_path="/home/cdsw/02_application/chromadb",
+        chunks_collection="document_chunks",
+        summaries_collection="document_summaries"
+    )
 
-        # Get the document text
-        if doc_id.startswith("doc_"):
-            # Get the document from the database
-            summary = chroma_storage.get_summary(doc_id)
-            if not summary:
-                return "Document not found in the database."
+    # Get the document text
+    if doc_id.startswith("doc_"):
+        # Get the document from the database
+        summary = chroma_storage.get_summary(doc_id)
+        if not summary:
+            return "Document not found in the database."
 
-            if "metadata" in summary and "source" in summary["metadata"]:
-                file_path = summary["metadata"]["source"]
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        text = f.read()
+        if "metadata" in summary and "source" in summary["metadata"]:
+            file_path = summary["metadata"]["source"]
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
 
-                    # Clean the text of PDF artifacts
-                    text = clean_document_text(text, file_path)
-                except Exception as e:
-                    return f"Error reading document: {e}"
-            else:
-                return "Document source file not found."
+                # Clean the text of PDF artifacts
+                text = clean_document_text(text, file_path)
+            except Exception as e:
+                return f"Error reading document: {e}"
         else:
-            return "Invalid document ID."
+            return "Document source file not found."
+    else:
+        return "Invalid document ID."
 
-        # Perform risk assessment
-        risk_assessment = document_processor.assess_legal_risks(
-            text,
-            risk_categories=["contractual", "regulatory", "litigation", "intellectual property"]
-        )
-        return risk_assessment
+    # Perform risk assessment
+    risk_assessment = document_processor.assess_legal_risks(
+        text,
+        risk_categories=["contractual", "regulatory", "litigation", "intellectual property"]
+    )
+    return risk_assessment
 
 
 def advanced_search_documents(query_text, max_results=5, search_chunks=True):
     """Search for legal documents or document chunks based on a text query."""
     chroma_storage = ChromaDBStorage(
-        db_path="./chromadb",
+        db_path="/home/cdsw/02_application/chromadb",
         chunks_collection="document_chunks",
         summaries_collection="document_summaries"
     )
@@ -754,7 +680,7 @@ def advanced_search_documents(query_text, max_results=5, search_chunks=True):
 def get_all_documents():
     """Get all legal documents in the database."""
     chroma_storage = ChromaDBStorage(
-        db_path="./chromadb",
+        db_path="/home/cdsw/02_application/chromadb",
         chunks_collection="document_chunks",
         summaries_collection="document_summaries"
     )
@@ -782,7 +708,7 @@ def check_database_has_documents():
     """Check if there are any documents in the database."""
     try:
         chroma_storage = ChromaDBStorage(
-            db_path="./chromadb",
+            db_path="/home/cdsw/02_application/chromadb",
             chunks_collection="document_chunks",
             summaries_collection="document_summaries"
         )
@@ -800,66 +726,22 @@ def check_database_has_documents():
 
 
 def run_initial_processing():
-    """Run initial document processing."""
-    # Check if using CrewAI
-    if st.session_state.crewai_enabled:
-        try:
-            add_status_message("No documents found in the database. Running initial document processing with CrewAI...",
-                               "info")
+    """Run the main.py script to process initial documents."""
+    try:
+        add_status_message("No documents found in the database. Running initial document processing...", "info")
 
-            # Make sure CrewAI is set up
-            if not st.session_state.crewai_agents:
-                setup_crewai()
+        # Call the process_documents function directly
+        with st.spinner("Processing legal documents in 'contracts' folder. This may take a while..."):
+            process_documents()
 
-            if not st.session_state.crewai_agents:
-                add_status_message("CrewAI setup failed", "error")
-                return False
-
-            # Process documents in contracts folder
-            contract_files = []
-            for root, dirs, files in os.walk("contracts"):
-                for filename in files:
-                    file_path = os.path.join(root, filename)
-                    # Check if file is of supported type
-                    ext = os.path.splitext(filename)[1].lower()
-                    if ext in ['.pdf', '.docx', '.txt']:
-                        contract_files.append((file_path, filename))
-
-            if not contract_files:
-                add_status_message("No documents found in the contracts folder", "warning")
-                return False
-
-            with st.spinner("Processing legal documents with CrewAI. This may take a while..."):
-                for file_path, filename in contract_files:
-                    # Process the document using our helper function
-                    process_document(file_path, filename)
-
-            add_status_message("Initial document processing with CrewAI completed!", "success")
-            return True
-        except Exception as e:
-            error_msg = f"Error during initial document processing with CrewAI: {e}"
-            add_status_message(error_msg, "error")
-            import traceback
-            add_status_message(traceback.format_exc(), "error")
-            return False
-    else:
-        # Original implementation using main.py
-        try:
-            add_status_message("No documents found in the database. Running initial document processing...", "info")
-
-            # Call the process_documents function directly
-            with st.spinner("Processing legal documents in 'contracts' folder. This may take a while..."):
-                process_documents()
-
-            add_status_message("Initial document processing completed!", "success")
-            return True
-        except Exception as e:
-            error_msg = f"Error during initial document processing: {e}"
-            add_status_message(error_msg, "error")
-            import traceback
-            add_status_message(traceback.format_exc(), "error")
-            return False
-
+        add_status_message("Initial document processing completed!", "success")
+        return True
+    except Exception as e:
+        error_msg = f"Error during initial document processing: {e}"
+        add_status_message(error_msg, "error")
+        import traceback
+        add_status_message(traceback.format_exc(), "error")
+        return False
 
 def create_risk_matrix(risks):
     """Create a risk matrix visualization for legal risks."""
@@ -918,7 +800,16 @@ def parse_risk_assessment(risk_text):
     """Parse risk assessment text into structured data for visualization."""
     risks = []
 
-    # This is a simple parser - in a real system, you'd use regex or NLP
+    # Convert CrewOutput to string if needed
+    if hasattr(risk_text, '__str__'):
+        risk_text = str(risk_text)
+
+    # Handle different formats
+    if not isinstance(risk_text, str):
+        print(f"Warning: risk_text is not a string but a {type(risk_text)}")
+        return []
+
+    # Now we can safely split the string
     lines = risk_text.split('\n')
 
     current_risk = None
@@ -954,6 +845,15 @@ def parse_risk_assessment(risk_text):
 def display_legal_definitions(definitions_text):
     """Parse and display legal definitions in a structured format."""
     st.subheader("Legal Definitions")
+
+    # Convert CrewOutput to string if needed
+    if hasattr(definitions_text, '__str__'):
+        definitions_text = str(definitions_text)
+
+    # Handle non-string types
+    if not isinstance(definitions_text, str):
+        st.error(f"Unexpected type for definitions: {type(definitions_text)}")
+        return
 
     # Check if definitions contains the "no definitions found" message
     if "No formal legal definitions" in definitions_text:
@@ -996,6 +896,246 @@ def display_legal_definitions(definitions_text):
         with st.expander(term):
             st.write(section)
 
+def save_settings_to_file():
+    """Save current settings to a JSON file."""
+    settings = {
+        "openai_endpoint": st.session_state.openai_endpoint,
+        "openai_api_key": st.session_state.openai_api_key,
+        "openai_model": st.session_state.openai_model
+    }
+
+    try:
+        os.makedirs("config", exist_ok=True)
+        with open("config/settings.json", "w") as f:
+            # Actually save the API key this time
+            json.dump(settings, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving settings: {e}")
+        return False
+
+
+def load_settings_from_file():
+    """Load settings from JSON file."""
+    try:
+        if os.path.exists("config/settings.json"):
+            with open("config/settings.json", "r") as f:
+                settings = json.load(f)
+
+                # Update session state with loaded settings
+                if "openai_endpoint" in settings:
+                    st.session_state.openai_endpoint = settings["openai_endpoint"]
+                if "openai_model" in settings:
+                    st.session_state.openai_model = settings["openai_model"]
+                # Actually load the API key
+                if "openai_api_key" in settings:
+                    st.session_state.openai_api_key = settings["openai_api_key"]
+
+            return True
+        return False
+    except Exception as e:
+        print(f"Error loading settings: {e}")
+        return False
+
+
+def test_crewai_connection():
+    """Test connection to OpenAI API via CrewAI."""
+    try:
+        # Ensure API key is set
+        if not ensure_api_key():
+            return {"success": False, "message": "API key is required"}
+
+        # Log for debugging
+        logging.info(f"Testing CrewAI connection with API key: {'*' * 5}{st.session_state.openai_api_key[-4:] if st.session_state.openai_api_key else 'None'}")
+        logging.info(f"Using model: {st.session_state.openai_model}")
+        logging.info(f"Using endpoint: {st.session_state.openai_endpoint}")
+
+        # Initialize LLM with more error checking
+        try:
+            llm = ChatOpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                base_url=st.session_state.openai_endpoint,
+                model=st.session_state.openai_model,
+                temperature=0
+            )
+            logging.info("LLM initialized successfully")
+        except Exception as e:
+            logging.error(f"Error initializing LLM: {e}")
+            return {"success": False, "message": f"Failed to initialize LLM: {str(e)}"}
+
+        # Create a simple agent and task
+        test_agent = Agent(
+            role="Legal Document Tester",
+            goal="Test connection to the API",
+            backstory="I'm testing if the API connection works properly.",
+            llm=llm,
+            verbose=True
+        )
+        logging.info("Agent created successfully")
+
+        test_task = Task(
+            description="Confirm if you can connect to the API by saying 'Connection successful!'",
+            agent=test_agent,
+            expected_output="A confirmation message"
+        )
+        logging.info("Task created successfully")
+
+        # Create a minimal crew
+        test_crew = Crew(
+            agents=[test_agent],
+            tasks=[test_task],
+            verbose=True,
+            process=Process.sequential
+        )
+        logging.info("Crew created successfully")
+
+        # Execute the crew
+        logging.info("Starting crew kickoff...")
+        result = test_crew.kickoff()
+        logging.info(f"Crew kickoff completed. Result: {result}")
+
+        return {"success": True, "message": f"Connection successful! Response: {result}"}
+
+    except Exception as e:
+        logging.error(f"Error testing CrewAI connection: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        return {"success": False, "message": str(e)}
+
+
+def check_environment():
+    """Check environment variables and settings."""
+    logging.info("Checking environment...")
+
+    # Check API key
+    api_key = os.environ.get("OPENAI_API_KEY")
+    logging.info(f"API key in environment: {'Yes' if api_key else 'No'}")
+
+    # Check other critical settings
+    logging.info(f"Current working directory: {os.getcwd()}")
+    logging.info(f"Agents YAML exists: {os.path.exists('agents.yaml')}")
+    logging.info(f"Tasks YAML exists: {os.path.exists('tasks.yaml')}")
+
+    # Check for ChromaDB
+    chroma_path = "/home/cdsw/02_application/chromadb"
+    logging.info(f"ChromaDB path exists: {os.path.exists(chroma_path)}")
+
+    # Print important paths
+    logging.info(f"UPLOAD_FOLDER path: {os.path.abspath(UPLOAD_FOLDER)}")
+    logging.info(f"RESULTS_FOLDER path: {os.path.abspath(RESULTS_FOLDER)}")
+
+
+# Call this at the start of the main function
+def main():
+    st.title("Legal Document Analysis System")
+
+    # Add debugging information
+    check_environment()
+
+def load_yaml_file(file_path: str):
+    """Load YAML file."""
+    print(f"Loading YAML file: {file_path}")
+    try:
+        import yaml
+        with open(file_path, 'r') as file:
+            data = yaml.safe_load(file)
+        print(f"Successfully loaded YAML file: {file_path}")
+        return data
+    except Exception as e:
+        print(f"Error loading YAML file {file_path}: {e}")
+        return {}
+
+
+def display_settings_tab():
+    """Display settings tab for OpenAI API configuration."""
+    st.header("System Settings")
+
+    with st.expander("OpenAI API Settings", expanded=True):
+        st.info(
+            "Configure OpenAI API settings for legal document analysis. An API key is required to process documents.")
+
+        # OpenAI endpoint
+        openai_endpoint = st.text_input(
+            "OpenAI API Endpoint",
+            value=st.session_state.openai_endpoint,
+            help="The endpoint URL for OpenAI API (or compatible service)"
+        )
+
+        # OpenAI API key
+        openai_api_key = st.text_input(
+            "OpenAI API Key",
+            value=st.session_state.openai_api_key,
+            type="password",
+            help="Your OpenAI API key (required for document processing)"
+        )
+
+        # OpenAI model selection
+        openai_models = [
+            "gpt-4o",
+            "gpt-4-turbo",
+            "gpt-4",
+            "gpt-3.5-turbo",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "claude-3-haiku-20240307"
+        ]
+
+        openai_model = st.selectbox(
+            "OpenAI/Compatible Model",
+            options=openai_models,
+            index=openai_models.index(
+                st.session_state.openai_model) if st.session_state.openai_model in openai_models else 0,
+            help="Select the model to use for legal document analysis"
+        )
+
+        # Add a warning if no API key is set
+        if not st.session_state.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
+            st.warning("⚠️ No OpenAI API key detected. You must provide an API key to process documents.")
+
+        # Save settings button
+        if st.button("Save API Settings"):
+            st.session_state.openai_endpoint = openai_endpoint
+            st.session_state.openai_api_key = openai_api_key
+            st.session_state.openai_model = openai_model
+
+            # Save settings to a config file
+            save_settings_to_file()
+
+            # Set the API key in environment variable immediately
+            if ensure_api_key():
+                st.success("Settings saved successfully! OpenAI API key configured.")
+            else:
+                st.warning("Settings saved, but no API key provided. Document processing will not work.")
+
+    with st.expander("CrewAI Configuration", expanded=True):
+        st.info("View your CrewAI agents and tasks configurations for legal document analysis")
+
+        # Display the current agents and tasks
+        st.subheader("Current Agent Configurations")
+        agents_yaml = load_yaml_file("agents.yaml")
+        if agents_yaml:
+            st.json(json.dumps(agents_yaml))
+        else:
+            st.warning("Could not load agents.yaml")
+
+        st.subheader("Current Task Configurations")
+        tasks_yaml = load_yaml_file("tasks.yaml")
+        if tasks_yaml:
+            st.json(json.dumps(tasks_yaml))
+        else:
+            st.warning("Could not load tasks.yaml")
+
+        # Test connection button
+        if st.button("Test OpenAI Connection"):
+            if not st.session_state.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
+                st.error("OpenAI API key is required. Please enter your API key above.")
+            else:
+                test_result = test_crewai_connection()
+                if test_result["success"]:
+                    st.success(test_result["message"])
+                else:
+                    st.error(f"Connection failed: {test_result['message']}")
+
 
 ###########################################
 # STREAMLIT UI
@@ -1003,6 +1143,12 @@ def display_legal_definitions(definitions_text):
 
 def main():
     st.title("Legal Document Analysis System")
+
+    # Load settings at startup
+    load_settings_from_file()
+
+    # Ensure API key is set
+    ensure_api_key()
 
     # Check if there are documents in the database
     if not check_database_has_documents():
@@ -1051,15 +1197,10 @@ def main():
         st.header("Legal Document Processing")
         st.write("Upload legal documents to process and compare with existing documents.")
 
-        # Check for OpenAI API key
-        api_key = os.environ.get('OPENAI_API_KEY')
-        if not api_key:
+        # Display API key status
+        if not api_key_configured:
             st.warning(
-                "OpenAI API key not found! Set the OPENAI_API_KEY environment variable before using this application.")
-            api_key_input = st.text_input("Enter OpenAI API Key:", type="password")
-            if api_key_input:
-                os.environ['OPENAI_API_KEY'] = api_key_input
-                st.success("API key set for this session. For permanent use, set it as an environment variable.")
+                "⚠️ No API key configured. Please add your OpenAI API key in the Settings tab before processing documents.")
 
         # File uploader - now accepts multiple files
         uploaded_files = st.file_uploader("Upload Legal Documents", type=["pdf", "docx", "txt"],
@@ -1068,47 +1209,54 @@ def main():
         if uploaded_files and len(uploaded_files) > 0:
             # Process button
             if st.button("Process Legal Documents"):
-                processed_docs = []
+                # Check for API key first
+                if not ensure_api_key():
+                    st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+                else:
+                    processed_docs = []
 
-                for uploaded_file in uploaded_files:
-                    try:
-                        # Save the file
-                        file_path, original_filename = save_uploaded_file(uploaded_file)
-                        add_status_message(f"File saved: {original_filename}", "success")
+                    for uploaded_file in uploaded_files:
+                        try:
+                            # Save the file
+                            file_path, original_filename = save_uploaded_file(uploaded_file)
+                            add_status_message(f"File saved: {original_filename}", "success")
 
-                        # Process the document
-                        processed_doc = process_document(file_path, original_filename)
-                        processed_docs.append(processed_doc)
+                            # Process the document
+                            processed_doc = process_document(file_path, original_filename)
+                            if processed_doc:  # Check if processing was successful
+                                processed_docs.append(processed_doc)
+                                add_status_message(f"Legal document processed: {original_filename}", "success")
+                            else:
+                                add_status_message(f"Failed to process {original_filename}", "error")
+                        except Exception as e:
+                            error_msg = f"Error processing {uploaded_file.name}: {e}"
+                            add_status_message(error_msg, "error")
+                            import traceback
+                            add_status_message(traceback.format_exc(), "error")
 
-                        add_status_message(f"Legal document processed: {original_filename}", "success")
-                    except Exception as e:
-                        error_msg = f"Error processing {uploaded_file.name}: {e}"
-                        add_status_message(error_msg, "error")
-                        import traceback
-                        add_status_message(traceback.format_exc(), "error")
+                    # After processing all documents, select the first one to display
+                    if processed_docs:
+                        st.session_state.all_processed_docs = processed_docs
+                        st.session_state.processed_doc = processed_docs[0]
 
-                # After processing all documents, select the first one to display
-                if processed_docs:
-                    st.session_state.all_processed_docs = processed_docs
-                    st.session_state.processed_doc = processed_docs[0]
+                        # Find similar documents for the currently selected document
+                        st.session_state.similar_docs = find_similar_documents(
+                            st.session_state.processed_doc,
+                            max_results=st.session_state.max_similar_docs,
+                            similarity_threshold=st.session_state.similarity_threshold
+                        )
 
-                    # Find similar documents for the currently selected document
-                    st.session_state.similar_docs = find_similar_documents(
-                        st.session_state.processed_doc,
-                        max_results=st.session_state.max_similar_docs,
-                        similarity_threshold=st.session_state.similarity_threshold
-                    )
+                        add_status_message(f"Processed {len(processed_docs)} legal documents", "success")
+                        add_status_message(f"Found {len(st.session_state.similar_docs)} similar legal documents",
+                                           "info")
 
-                    add_status_message(f"Processed {len(processed_docs)} legal documents", "success")
-                    add_status_message(f"Found {len(st.session_state.similar_docs)} similar legal documents", "info")
+                        # Reset selected docs and comparison
+                        st.session_state.selected_docs = []
+                        st.session_state.summaries = {}
+                        st.session_state.comparison_result = None
 
-                    # Reset selected docs and comparison
-                    st.session_state.selected_docs = []
-                    st.session_state.summaries = {}
-                    st.session_state.comparison_result = None
-
-                    # Force a rerun to update the UI
-                    st.rerun()
+                        # Force a rerun to update the UI
+                        st.rerun()
 
         # Search options
         st.header("Search Options")
@@ -1153,8 +1301,12 @@ def main():
                 st.warning("Please enter a search query")
 
     # Main content - create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Document Processing & Legal Analysis", "Search Results", "Document Database", "API Settings"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Document Processing & Legal Analysis",
+        "Search Results",
+        "Document Database",
+        "Settings"
+    ])
 
     # Tab 1: Document Processing & Legal Analysis
     with tab1:
@@ -1277,12 +1429,19 @@ def main():
 
                 # Add a button to extract definitions
                 if st.button("Extract Legal Definitions"):
-                    with st.spinner("Extracting legal definitions..."):
-                        if st.session_state.processed_doc and "doc_id" in st.session_state.processed_doc:
-                            definitions = extract_legal_definitions(st.session_state.processed_doc["doc_id"])
-                            st.session_state.definitions = definitions
-                        else:
-                            st.error("No document available for definition extraction.")
+                    # Check for API key first
+                    if not ensure_api_key():
+                        st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+                    else:
+                        with st.spinner("Extracting legal definitions..."):
+                            if st.session_state.processed_doc and "doc_id" in st.session_state.processed_doc:
+                                definitions = extract_legal_definitions(st.session_state.processed_doc["doc_id"])
+                                if definitions:  # Check if extraction was successful
+                                    st.session_state.definitions = definitions
+                                else:
+                                    st.error("Failed to extract legal definitions. Please check your API key.")
+                            else:
+                                st.error("No document available for definition extraction.")
 
                 # Display definitions if available
                 if hasattr(st.session_state, 'definitions'):
@@ -1296,9 +1455,16 @@ def main():
 
                 # Risk assessment button
                 if st.button("Perform Legal Risk Assessment"):
-                    with st.spinner("Performing legal risk assessment..."):
-                        risk_assessment = assess_legal_risks(st.session_state.processed_doc["doc_id"])
-                        st.session_state.risk_assessment = risk_assessment
+                    # Check for API key first
+                    if not ensure_api_key():
+                        st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+                    else:
+                        with st.spinner("Performing legal risk assessment..."):
+                            risk_assessment = assess_legal_risks(st.session_state.processed_doc["doc_id"])
+                            if risk_assessment:  # Check if assessment was successful
+                                st.session_state.risk_assessment = risk_assessment
+                            else:
+                                st.error("Failed to perform risk assessment. Please check your API key.")
 
                 # Display risk assessment if available
                 if hasattr(st.session_state, 'risk_assessment'):
@@ -1372,18 +1538,28 @@ def main():
 
                     with col2:
                         if st.button("Compare Legal Documents") and st.session_state.selected_docs:
-                            # Fetch summaries if not already fetched
-                            if not st.session_state.summaries:
-                                for doc_id in st.session_state.selected_docs:
-                                    summary = get_document_summary(doc_id)
-                                    if summary:
-                                        st.session_state.summaries[doc_id] = summary
+                            # Check for API key first
+                            if not ensure_api_key():
+                                st.error(
+                                    "OpenAI API key is required. Please configure your API key in the Settings tab.")
+                            else:
+                                # Fetch summaries if not already fetched
+                                if not st.session_state.summaries:
+                                    for doc_id in st.session_state.selected_docs:
+                                        summary = get_document_summary(doc_id)
+                                        if summary:
+                                            st.session_state.summaries[doc_id] = summary
 
-                            # Compare documents
-                            st.session_state.comparison_result = compare_documents(
-                                st.session_state.processed_doc,
-                                st.session_state.summaries
-                            )
+                                # Compare documents
+                                comparison_result = compare_documents(
+                                    st.session_state.processed_doc,
+                                    st.session_state.summaries
+                                )
+
+                                if comparison_result:  # Check if comparison was successful
+                                    st.session_state.comparison_result = comparison_result
+                                else:
+                                    st.error("Failed to compare documents. Please check your API key.")
 
                 # Display summaries
                 if st.session_state.summaries:
@@ -1412,236 +1588,196 @@ def main():
                             else:
                                 st.write(summary)
 
-                            # Add option to run process_documents again
                         st.markdown("---")
-                        st.subheader("Process Additional Legal Documents")
-                        if st.button("Process Legal Documents in 'contracts' Folder"):
-                            try:
-                                if st.session_state.crewai_enabled:
-                                    # Run initial processing using CrewAI
-                                    run_initial_processing()
-                                else:
-                                    with st.spinner(
-                                            "Processing legal documents in 'contracts' folder. This may take a while..."):
-                                        result = process_documents()
-                                    add_status_message(
-                                        f"Legal document processing completed! Processed {len(result) if result else 0} documents.",
-                                        "success")
-                                st.rerun()
-                            except Exception as e:
-                                error_msg = f"Error processing legal documents: {e}"
-                                add_status_message(error_msg, "error")
-                                import traceback
-                                add_status_message(traceback.format_exc(), "error")
+
+                # Display comparison result
+                if st.session_state.comparison_result:
+                    st.header("Legal Document Comparison")
+                    st.write(st.session_state.comparison_result)
+
+        else:
+            # Display instructions
+            st.info("Upload legal document(s) and click 'Process Legal Documents' to start.")
+            st.write("""
+            **This system allows you to:**
+            1. Upload multiple legal documents (PDF, DOCX, TXT) simultaneously
+            2. Process them to extract text, generate legal summaries, and store in a vector database
+            3. Analyze key legal provisions, obligations, and rights
+            4. Extract and analyze legal definitions with improved accuracy
+            5. Perform risk assessment of legal documents
+            6. Find similar legal documents in the database
+            7. Compare documents to identify legal similarities and differences
+            """)
+
+            if not api_key_configured:
+                st.warning("⚠️ Before processing documents, please configure your OpenAI API key in the Settings tab.")
+
+    # Tab 2: Search Results
+    with tab2:
+        if hasattr(st.session_state, 'search_results') and st.session_state.search_results:
+            st.header("Legal Search Results")
+
+            # Create a dataframe for display
+            results_df = pd.DataFrame(st.session_state.search_results)
+
+            # Format similarity score
+            if "similarity_score" in results_df.columns:
+                results_df["similarity_score"] = results_df["similarity_score"].apply(
+                    lambda x: f"{x:.2f}" if x is not None else "N/A"
+                )
+
+            # Display table of results
+            st.dataframe(results_df[["doc_id", "filename", "chunk", "similarity_score"]])
+
+            # Display individual results
+            for i, result in enumerate(st.session_state.search_results):
+                # Format the similarity score
+                score_display = f"{result['similarity_score']:.2f}" if result['similarity_score'] is not None else "N/A"
+                with st.expander(f"Result {i + 1}: {result['filename']} - {result['doc_id']} (Score: {score_display})"):
+                    st.write("**Document ID:** " + result["doc_id"])
+                    st.write("**Filename:** " + result["filename"])
+
+                    if result["chunk"] != "summary":
+                        st.write(f"**Chunk:** {result['chunk']}")
+
+                    st.write("**Content:**")
+                    st.write(result["text"])
+
+                    # Button to view full document summary
+                    if st.button(f"View Full Legal Document", key=f"view_summary_{i}"):
+                        summary = get_document_summary(result["doc_id"])
+                        if summary:
+                            st.session_state.view_summary = {
+                                "doc_id": result["doc_id"],
+                                "filename": result["filename"],
+                                "summary": summary
+                            }
+
+            # Display selected summary if any
+            if hasattr(st.session_state, 'view_summary') and st.session_state.view_summary:
+                st.header(f"Legal Document Summary: {st.session_state.view_summary['filename']}")
+
+                summary = st.session_state.view_summary["summary"]
+
+                if isinstance(summary, dict) and "text" in summary:
+                    # Display the summary text
+                    st.write(summary["text"])
+                else:
+                    # Try to extract from the raw text
+                    parts = summary.split("SUMMARY:", 1)
+                    if len(parts) > 1:
+                        summary_text = parts[1].split("ANALYSIS:", 1)[0].strip()
+                        analysis_text = parts[1].split("ANALYSIS:", 1)[1].strip() if "ANALYSIS:" in parts[1] else ""
+
+                        st.write("**Legal Summary:**")
+                        st.write(summary_text)
+
+                        st.write("**Legal Analysis:**")
+                        st.write(analysis_text)
                     else:
-                        st.info("No legal documents found in the database.")
+                        st.write(summary)
+        else:
+            st.info("Use the legal document search in the sidebar to search for documents.")
 
-                        # Add option to run process_documents
-                        st.subheader("Process Legal Documents")
-                        if st.button("Process Legal Documents in 'contracts' Folder"):
-                            try:
-                                if st.session_state.crewai_enabled:
-                                    # Run initial processing using CrewAI
-                                    run_initial_processing()
-                                else:
-                                    with st.spinner(
-                                            "Processing legal documents in 'contracts' folder. This may take a while..."):
-                                        result = process_documents()
-                                    add_status_message(
-                                        f"Legal document processing completed! Processed {len(result) if result else 0} documents.",
-                                        "success")
-                                st.rerun()
-                            except Exception as e:
-                                error_msg = f"Error processing legal documents: {e}"
-                                add_status_message(error_msg, "error")
-                                import traceback
-                                add_status_message(traceback.format_exc(), "error")
+    # Tab 3: Document Database
+    with tab3:
+        st.header("Legal Document Database")
 
-                        # Tab 4: API Settings
-                    with tab4:
-                        st.header("API Settings")
+        # Add a refresh button
+        if st.button("Refresh Document List"):
+            st.rerun()
 
-                        # CrewAI Settings
-                        st.subheader("CrewAI Settings")
+        # Get all documents in the database
+        documents = get_all_documents()
 
-                        # Toggle for enabling CrewAI
-                        crewai_enabled = st.checkbox("Use CrewAI for processing",
-                                                     value=st.session_state.crewai_enabled,
-                                                     help="Enable to use CrewAI agents for document processing")
+        if documents:
+            st.write(f"Found {len(documents)} legal documents in the database:")
 
-                        if crewai_enabled != st.session_state.crewai_enabled:
-                            st.session_state.crewai_enabled = crewai_enabled
-                            if crewai_enabled:
-                                # Initialize CrewAI if enabled
-                                setup_crewai()
-                                st.success("CrewAI enabled successfully!")
-                            else:
-                                st.success("CrewAI disabled. Using direct OpenAI API.")
-                                # Clear CrewAI-specific session state
-                                st.session_state.crewai_agents = {}
-                                st.session_state.crewai_tasks = {}
-                                st.session_state.crewai_crew = None
+            # Create a dataframe for display
+            docs_df = pd.DataFrame(documents)
 
-                        if st.session_state.crewai_enabled:
-                            # CrewAI model selection
-                            crewai_model = st.text_input("CrewAI Model Name",
-                                                         value=st.session_state.crewai_model,
-                                                         help="Model name in format 'provider/model' (e.g., openai/gpt-4)")
+            # Display table
+            st.dataframe(docs_df)
 
-                            # Temperature slider
-                            crewai_temperature = st.slider("CrewAI Temperature",
-                                                           min_value=0.0,
-                                                           max_value=1.0,
-                                                           value=st.session_state.crewai_temperature,
-                                                           step=0.1,
-                                                           help="Controls creativity (0=deterministic, 1=creative)")
+            # Select documents to view
+            selected_doc_id = st.selectbox(
+                "Select a document to view its legal summary:",
+                options=[doc["doc_id"] for doc in documents],
+                format_func=lambda x: next((f"{doc['filename']} (ID: {x})" for doc in documents if doc["doc_id"] == x),
+                                           x)
+            )
 
-                            # Apply CrewAI settings
-                            if (crewai_model != st.session_state.crewai_model or
-                                    crewai_temperature != st.session_state.crewai_temperature):
-                                st.session_state.crewai_model = crewai_model
-                                st.session_state.crewai_temperature = crewai_temperature
+            if st.button("View Legal Document Summary"):
+                summary = get_document_summary(selected_doc_id)
+                if summary:
+                    st.subheader(
+                        f"Legal summary for document: {next((doc['filename'] for doc in documents if doc['doc_id'] == selected_doc_id), selected_doc_id)}")
 
-                                # Reset CrewAI setup to apply new settings
-                                st.session_state.crewai_agents = {}
-                                st.session_state.crewai_tasks = {}
-                                st.session_state.crewai_crew = None
+                    if isinstance(summary, dict) and "text" in summary:
+                        # Display the summary text
+                        st.write(summary["text"])
+                    else:
+                        # Try to extract from the raw text
+                        parts = summary.split("SUMMARY:", 1)
+                        if len(parts) > 1:
+                            summary_text = parts[1].split("ANALYSIS:", 1)[0].strip()
+                            analysis_text = parts[1].split("ANALYSIS:", 1)[1].strip() if "ANALYSIS:" in parts[1] else ""
 
-                                # Re-initialize with new settings
-                                setup_crewai()
-                                st.success("CrewAI settings updated successfully!")
+                            st.write("**Legal Summary:**")
+                            st.write(summary_text)
 
-                            # Display agent and task information
-                            if st.session_state.crewai_agents and st.session_state.crewai_tasks:
-                                with st.expander("CrewAI Configuration", expanded=False):
-                                    st.write("### Available Agents")
-                                    for agent_id, agent in st.session_state.crewai_agents.items():
-                                        st.write(f"- **{agent_id}**: {agent.role}")
-
-                                    st.write("### Available Tasks")
-                                    for task_id, task in st.session_state.crewai_tasks.items():
-                                        st.write(f"- **{task_id}**: {task.description[:80]}..." if len(
-                                            task.description) > 80 else f"- **{task_id}**: {task.description}")
-
-                            # Button to reload configuration files
-                            if st.button("Reload CrewAI Configuration Files"):
-                                setup_crewai()
-                                st.success("CrewAI configuration reloaded!")
-
-                        st.markdown("---")
-
-                        # OpenAI API settings (shown regardless of CrewAI toggle)
-                        st.subheader("OpenAI API Settings")
-
-                        # API Key input (with warning if not set)
-                        api_key = os.environ.get('OPENAI_API_KEY')
-                        if not api_key:
-                            st.warning("OpenAI API key not found in environment variables!")
+                            st.write("**Legal Analysis:**")
+                            st.write(analysis_text)
                         else:
-                            st.success("OpenAI API key found in environment variables.")
+                            st.write(summary)
 
-                        new_api_key = st.text_input(
-                            "Enter OpenAI API Key:",
-                            type="password",
-                            help="Your API key will be stored in session memory only and not saved permanently."
-                        )
+            # Add option to run process_documents again
+            st.markdown("---")
+            st.subheader("Process Additional Legal Documents")
+            if st.button("Process Legal Documents in 'contracts' Folder"):
+                # Check for API key first
+                if not ensure_api_key():
+                    st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+                else:
+                    try:
+                        with st.spinner("Processing legal documents in 'contracts' folder. This may take a while..."):
+                            result = process_documents()
+                        add_status_message(
+                            f"Legal document processing completed! Processed {len(result) if result else 0} documents.",
+                            "success")
+                        st.rerun()
+                    except Exception as e:
+                        error_msg = f"Error processing legal documents: {e}"
+                        add_status_message(error_msg, "error")
+                        import traceback
+                        add_status_message(traceback.format_exc(), "error")
+        else:
+            st.info("No legal documents found in the database.")
 
-                        if new_api_key:
-                            os.environ['OPENAI_API_KEY'] = new_api_key
-                            st.success("API key set for this session.")
+            # Add option to run process_documents
+            st.subheader("Process Legal Documents")
+            if st.button("Process Legal Documents in 'contracts' Folder"):
+                # Check for API key first
+                if not ensure_api_key():
+                    st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
+                else:
+                    try:
+                        with st.spinner("Processing legal documents in 'contracts' folder. This may take a while..."):
+                            result = process_documents()
+                        add_status_message(
+                            f"Legal document processing completed! Processed {len(result) if result else 0} documents.",
+                            "success")
+                        st.rerun()
+                    except Exception as e:
+                        error_msg = f"Error processing legal documents: {e}"
+                        add_status_message(error_msg, "error")
+                        import traceback
+                        add_status_message(traceback.format_exc(), "error")
 
-                        # API Endpoint configuration
-                        new_api_endpoint = st.text_input(
-                            "API Endpoint URL:",
-                            value=st.session_state.api_endpoint,
-                            help="Default is the official OpenAI API endpoint. Change this if you're using a compatible alternative API."
-                        )
+    # Tab 4: Settings
+    with tab4:
+        display_settings_tab()
 
-                        if new_api_endpoint != st.session_state.api_endpoint:
-                            st.session_state.api_endpoint = new_api_endpoint
-                            st.success(f"API endpoint updated to: {new_api_endpoint}")
 
-                        # Model selection
-                        available_models = [
-                            "gpt-4o-latest",
-                            "gpt-4o",
-                            "gpt-4-turbo",
-                            "gpt-4",
-                            "gpt-3.5-turbo",
-                            # Add other models here
-                        ]
-
-                        # Allow custom model input
-                        custom_model = st.checkbox("Use custom model name",
-                                                   help="Enable this to enter a custom model identifier not in the dropdown list")
-
-                        if custom_model:
-                            new_api_model = st.text_input("Custom Model Name:", value=st.session_state.api_model)
-                        else:
-                            new_api_model = st.selectbox("Select Model:", available_models,
-                                                         index=available_models.index(st.session_state.api_model)
-                                                         if st.session_state.api_model in available_models else 0)
-
-                        if new_api_model != st.session_state.api_model:
-                            st.session_state.api_model = new_api_model
-                            st.success(f"Model updated to: {new_api_model}")
-
-                        # Apply settings button
-                        if st.button("Apply OpenAI API Settings"):
-                            st.success("Settings applied successfully!")
-                            # We'll adjust the processor initialization to use these settings
-                            st.info("New settings will be used for all subsequent processing operations.")
-
-                        # Display current settings
-                        st.subheader("Current Settings")
-                        settings = {
-                            "api_endpoint": st.session_state.api_endpoint,
-                            "api_model": st.session_state.api_model,
-                            "api_key": "Set" if os.environ.get('OPENAI_API_KEY') else "Not Set",
-                            "crewai_enabled": st.session_state.crewai_enabled
-                        }
-
-                        if st.session_state.crewai_enabled:
-                            settings.update({
-                                "crewai_model": st.session_state.crewai_model,
-                                "crewai_temperature": st.session_state.crewai_temperature,
-                                "crewai_agents_loaded": len(st.session_state.crewai_agents) > 0,
-                                "crewai_tasks_loaded": len(st.session_state.crewai_tasks) > 0
-                            })
-
-                        st.json(settings)
-
-                        # Help section
-                        with st.expander("Need help with API settings?"):
-                            st.markdown("""
-                                        ### API Settings Help
-
-                                        **OpenAI API Key**: Your OpenAI API key is required to access the API. You can find your API key in your OpenAI account dashboard.
-
-                                        **API Endpoint**: The default endpoint is `https://api.openai.com/v1`. You only need to change this if:
-                                        - You're using a proxy service
-                                        - You have a custom deployment
-                                        - You're using an API-compatible alternative
-
-                                        **Model Selection**: Choose the model to use for legal document processing:
-                                        - `gpt-4o-latest`: Latest GPT-4o model (recommended)
-                                        - `gpt-4o`: GPT-4o model
-                                        - `gpt-4-turbo`: GPT-4 Turbo model
-                                        - `gpt-4`: GPT-4 model
-                                        - `gpt-3.5-turbo`: GPT-3.5 Turbo model (faster but less capable)
-
-                                        If you need to use a model that's not in the dropdown, check "Use custom model name" and enter the model identifier.
-
-                                        ### CrewAI Settings Help
-
-                                        **Use CrewAI**: Toggle to enable or disable CrewAI integration. When enabled, the system will use CrewAI agents for document processing.
-
-                                        **CrewAI Model Name**: The model to use for CrewAI agents. Format should be `provider/model`, e.g., `openai/gpt-4`.
-
-                                        **CrewAI Temperature**: Controls the creativity of the model responses. Lower values (0.0) make responses more deterministic and focused, while higher values (1.0) make responses more creative and varied.
-
-                                        **Configuration Files**: The system loads agent and task configurations from `agents.yaml` and `tasks.yaml` files. Make sure these files exist and are properly formatted.
-                                        """)
-
-                    if __name__ == "__main__":
-                        main()
+if __name__ == "__main__":
+    main()

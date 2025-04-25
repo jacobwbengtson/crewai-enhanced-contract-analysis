@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/crewai-enhanced-contract-analysis-final.iml" filepath="$PROJECT_DIR$/.idea/crewai-enhanced-contract-analysis-final.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/crewai-enhanced-contract-analysis.iml" filepath="$PROJECT_DIR$/.idea/crewai-enhanced-contract-analysis.iml" />
     </modules>
   </component>
 </project>

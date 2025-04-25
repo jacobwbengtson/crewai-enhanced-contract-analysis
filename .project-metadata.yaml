@@ -1,17 +1,20 @@
-name: Agentic Contract Analysis
-description: "This AMP is a basic starting point for building Agentic AI Tools to analyze contracts. This allows for the streamlining of the contract processing and review process."
-author: "Michael Schuler"
+name: Agentic Real-Time Well Monitoring
+description: "This AMP is a basic starting point for building Agentic AI Tools to monitor gas and oil sites and wells.  
+Providing manuals and other materials to the AI can help further make it's responses more intelligent and beneficial to 
+to helping reduce failures and costs associated with those unforseen failures."
+author: "Cloudera"
 specification_version: 1.0
 prototype_version: 1.0
-date: "2025-04-23"
+date: "2025-02-03"
 
 environment_variables:
     OPENAI_API_KEY:
       default: ""
-      description: "OpenAI API Key for LLM Calls"
+      description: "OPENAI API Key for LLM Calls"
+
 
 runtimes:
-  - editor: JupyterLab
+  - editor: Jupyterlab
     kernel: Python 3.12
     edition: Standard
 
@@ -19,10 +22,10 @@ tasks:
   - type: create_job
     name: Install dependencies
     entity_label: install_deps
-    script: 01_install/deps_installer.py
+    script: 01_install/requirements_installer.py
     arguments: None
-    cpu: 4
-    memory: 16
+    cpu: 2
+    memory: 8
     short_summary: Create job to install project dependencies.
     environment:
       TASK_TYPE: CREATE/RUN_JOB
@@ -34,12 +37,13 @@ tasks:
       Running the job to install dependencies.  Note that this requires at least 2GB of memory
 
   - type: start_application
-    name: Agentic Contract Analysis
-    short_summary: Creates the Legal Contract Application
-    long_summary: Creates the Legal Contract Application to analyze contracts.
-    subdomain: LegalEagle
+    name: Agentic Contract Analysis App
+    short_summary: Creates an application to serve the backend application.
+    long_summary: Creates an application to serve the backend application.
+    subdomain: IntelligentOwl
     script: 02_application/startup.py
     cpu: 4
     memory: 8
+    gpu: 1
     environment_variables:
       TASK_TYPE: START_APPLICATION

@@ -55,6 +55,7 @@ def start_streamlit():
 
     # Set environment variables for Streamlit
     env = os.environ.copy()
+    env['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
     env["STREAMLIT_SERVER_ADDRESS"] = host
     env["STREAMLIT_SERVER_PORT"] = str(port)
     env["STREAMLIT_SERVER_HEADLESS"] = "true"

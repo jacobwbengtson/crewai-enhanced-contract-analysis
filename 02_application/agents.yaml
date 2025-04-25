@@ -16,9 +16,8 @@ document_summarizer:
   goal: "Create concise, accurate summaries of legal documents highlighting legal implications"
   backstory: "An expert in distilling complex legal language into clear, accessible summaries that maintain legal precision"
   tools:
-    - name: "OpenAISummarizationTool"
+    - name: "OllamaSummarizationTool"
       args:
-        model_name: "gpt-4o-latest"
         max_length: 5000
   verbose: true
   allow_delegation: true
@@ -28,9 +27,8 @@ legal_analyzer:
   goal: "Analyze legal documents for key provisions, obligations, and rights"
   backstory: "A legal expert with deep knowledge of contract law, regulations, and legal language interpretation"
   tools:
-    - name: "OpenAIAnalysisTool"
+    - name: "OllamaAnalysisTool"
       args:
-        model_name: "gpt-4o-latest"
         max_length: 5000
   verbose: true
   allow_delegation: true
@@ -42,8 +40,7 @@ document_comparer:
   tools:
     - name: "DocumentComparisonTool"
       args:
-        model_name: "gpt-4o-latest"
-        max_length: 2500
+        max_length: 5000
     - name: "ChromaDBRetrievalTool"
       args:
         db_path: "./chromadb"
@@ -57,9 +54,8 @@ contract_reviewer:
   goal: "Identify and assess legal risks, obligations, and rights in contracts"
   backstory: "A contract law specialist with experience reviewing thousands of commercial agreements"
   tools:
-    - name: "OpenAIAnalysisTool"
+    - name: "OllamaAnalysisTool"
       args:
-        model_name: "gpt-4o-latest"
         max_length: 5000
     - name: "ChromaDBRetrievalTool"
       args:
@@ -73,9 +69,8 @@ legal_compliance_checker:
   goal: "Assess documents for compliance with relevant laws and regulations"
   backstory: "A compliance expert with experience in regulatory frameworks across multiple industries"
   tools:
-    - name: "OpenAIAnalysisTool"
+    - name: "OllamaAnalysisTool"
       args:
-        model_name: "gpt-4o-latest"
         max_length: 5000
     - name: "ChromaDBRetrievalTool"
       args:
@@ -89,9 +84,8 @@ legal_terminology_extractor:
   goal: "Extract and explain key legal terms and definitions from documents"
   backstory: "A legal linguist with expertise in legal terminology and definitions across multiple practice areas"
   tools:
-    - name: "OpenAIAnalysisTool"
+    - name: "OllamaAnalysisTool"
       args:
-        model_name: "gpt-4o-latest"
         max_length: 5000
     - name: "ChromaDBRetrievalTool"
       args:
@@ -105,9 +99,8 @@ legal_risk_assessor:
   goal: "Identify and evaluate legal risks in documents"
   backstory: "A risk management professional with extensive legal background in identifying potential legal exposure"
   tools:
-    - name: "OpenAIAnalysisTool"
+    - name: "OllamaAnalysisTool"
       args:
-        model_name: "gpt-4o-latest"
         max_length: 5000
     - name: "ChromaDBRetrievalTool"
       args:

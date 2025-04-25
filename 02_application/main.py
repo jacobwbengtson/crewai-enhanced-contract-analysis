@@ -37,9 +37,10 @@
 #  DATA.
 #
 # ###########################################################################
+
 import os
 import yaml
-import requests
+import json
 from typing import List, Dict, Any
 import chromadb
 from chromadb.utils import embedding_functions
@@ -47,17 +48,14 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 import re
 import docx
 import PyPDF2
-import openai
-from dotenv import load_dotenv
-
-# Load environment variables from .env file if present
-load_dotenv()
+from crewai import Agent, Task, Crew, Process
+from langchain_openai import ChatOpenAI
 
 
 class ChromaDBStorage:
     """Storage for document chunks and summaries in ChromaDB."""
 
-    def __init__(self, db_path: str = "./chromadb", chunks_collection: str = "document_chunks",
+    def __init__(self, db_path: str = "/home/cdsw/02_applicaton/chromadb", chunks_collection: str = "document_chunks",
                  summaries_collection: str = "document_summaries"):
         """Initialize ChromaDB storage."""
         print(f"Initializing ChromaDB storage at {os.path.abspath(db_path)}")
@@ -76,11 +74,11 @@ class ChromaDBStorage:
         self.client = chromadb.PersistentClient(path=db_path)
         print("ChromaDB client initialized")
 
-        # Create embedding function
+        # Create embedding function - USING ONLY LOCAL MODELS
         self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-MiniLM-L6-v2"
         )
-        print("Embedding function created")
+        print("Embedding function created (using SentenceTransformers)")
 
         # Get or create chunks collection
         try:
@@ -221,34 +219,153 @@ class ChromaDBStorage:
             return None
 
 
-class OpenAIDocumentProcessor:
-    """Processor for legal documents using OpenAI API."""
+class CrewAIDocumentProcessor:
+    """Document processor using CrewAI for legal document analysis."""
 
-    def __init__(self, model_name: str = "gpt-4o-latest", max_length: int = 5000, api_key: str = None,
-                 api_base: str = None):
-        """Initialize document processor."""
-        print(f"Initializing OpenAI legal document processor with model: {model_name}")
-        self.model_name = model_name
-        self.max_length = max_length
+    def __init__(self,
+                 api_key: str = None,
+                 base_url: str = "https://api.openai.com/v1",
+                 model: str = "gpt-4o",
+                 agents_yaml_path: str = "agents.yaml",
+                 tasks_yaml_path: str = "tasks.yaml"):
+        """Initialize CrewAI document processor."""
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.base_url = base_url
+        self.model = model
+        self.agents_yaml_path = agents_yaml_path
+        self.tasks_yaml_path = tasks_yaml_path
 
-        # Configure API settings
-        if api_key:
-            openai.api_key = api_key
+        # Load agents and tasks configurations
+        self.agents_config = self._load_yaml_file(agents_yaml_path)
+        self.tasks_config = self._load_yaml_file(tasks_yaml_path)
 
-        # Set custom API base URL if provided
-        if api_base:
-            openai.base_url = api_base
-            print(f"Using custom API base URL: {api_base}")
+        # Initialize LLM
+        self._initialize_llm()
 
-        # Initialize text splitter
+        # Initialize CrewAI agents (lazy loading - will be created when needed)
+        self.agents = {}
+        self.tasks = {}
+
+        # Initialize text splitter for document processing
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=100
         )
 
+    def _load_yaml_file(self, file_path: str) -> Dict[str, Any]:
+        """Load YAML configuration file."""
+        print(f"Loading YAML file: {file_path}")
+        try:
+            with open(file_path, 'r') as file:
+                data = yaml.safe_load(file)
+            print(f"Successfully loaded YAML file: {file_path}")
+            return data
+        except Exception as e:
+            print(f"Error loading YAML file {file_path}: {e}")
+            return {}
+
+    def _initialize_llm(self):
+        """Initialize language model for CrewAI."""
+        try:
+            # Make sure we have an API key
+            if not self.api_key:
+                raise ValueError("OpenAI API key is required")
+
+            self.llm = ChatOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model=self.model,
+                temperature=0.2
+            )
+            print(f"Initialized LLM: {self.model} at {self.base_url}")
+        except Exception as e:
+            error_msg = f"Error initializing LLM: {e}"
+            print(error_msg)
+            self.llm = None
+            raise ValueError(f"Failed to initialize OpenAI LLM: {error_msg}")
+
+    def _create_agent(self, agent_type: str) -> Agent:
+        """Create a CrewAI agent from configuration."""
+        if agent_type not in self.agents_config:
+            # Create a default agent if not found in config
+            print(f"Agent type '{agent_type}' not found in configuration, using default")
+            role = "Legal Document Processor"
+            goal = "Process legal documents efficiently and extract key information"
+            backstory = "An expert in legal document analysis with experience in processing legal documents"
+        else:
+            # Get agent config
+            agent_config = self.agents_config[agent_type]
+            role = agent_config.get("role", "Legal Document Assistant")
+            goal = agent_config.get("goal", "Process legal documents efficiently")
+            backstory = agent_config.get("backstory", "An expert in legal document analysis")
+
+        # Create agent
+        try:
+            agent = Agent(
+                role=role,
+                goal=goal,
+                backstory=backstory,
+                llm=self.llm,
+                verbose=True,
+                allow_delegation=True
+            )
+            return agent
+        except Exception as e:
+            print(f"Error creating agent: {e}")
+            raise ValueError(f"Failed to create agent {agent_type}: {e}")
+
+    def _create_task(self, task_type: str, context: Dict[str, Any] = None, **kwargs) -> Task:
+        """Create a CrewAI task from configuration with context."""
+        if task_type not in self.tasks_config:
+            raise ValueError(f"Task type '{task_type}' not found in configuration")
+
+        task_config = self.tasks_config[task_type]
+
+        # Get agent type
+        agent_type = task_config.get("agent", "document_processor")
+
+        # Get or create agent
+        if agent_type not in self.agents:
+            self.agents[agent_type] = self._create_agent(agent_type)
+
+        # Format the description with kwargs values
+        description = task_config.get("description", "")
+        try:
+            # Format with kwargs, handling missing keys gracefully
+            for key, value in kwargs.items():
+                if f"{{{key}}}" in description:
+                    description = description.replace(f"{{{key}}}", str(value))
+        except Exception as e:
+            print(f"Warning: Error formatting task description: {e}")
+
+        # Create task - IMPORTANT: only add context if it's compatible with the task
+        # Some newer versions of CrewAI may expect context to be a list, not a dict
+        try:
+            # First try without context
+            task = Task(
+                description=description,
+                expected_output=task_config.get("expected_output", ""),
+                agent=self.agents[agent_type]
+            )
+            return task
+        except Exception as e:
+            print(f"Warning: Could not create task without context: {e}")
+            try:
+                # If that fails, try with an empty list as context (if context expected)
+                task = Task(
+                    description=description,
+                    expected_output=task_config.get("expected_output", ""),
+                    agent=self.agents[agent_type],
+                    context=[]
+                )
+                return task
+            except Exception as e2:
+                print(f"Error creating task with empty list context: {e2}")
+                raise ValueError(f"Failed to create task {task_type}: {e2}")
+
     def extract_text(self, file_path: str) -> str:
         """Extract text from various document formats."""
-        print(f"Extracting text from legal document: {file_path}")
+        print(f"Extracting text from document: {file_path}")
         file_extension = os.path.splitext(file_path)[1].lower()
 
         if file_extension == '.pdf':
@@ -261,19 +378,93 @@ class OpenAIDocumentProcessor:
             raise ValueError(f"Unsupported file format: {file_extension}")
 
     def _extract_from_pdf(self, file_path: str) -> str:
-        """Extract text from PDF files."""
+        """Extract text from PDF files with improved reliability."""
         print(f"Extracting text from PDF: {file_path}")
+
+        # Try multiple extraction methods until we get usable text
+        text = ""
+
+        # Method 1: PyPDF2
         try:
             with open(file_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
                 text = ""
                 for page in reader.pages:
-                    text += page.extract_text() + "\n"
-            print(f"Extracted {len(text)} characters from PDF")
-            return text
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+
+                print(f"PyPDF2 extracted {len(text)} characters from PDF")
+
+                # If we got a reasonable amount of text, return it
+                if len(text) > 100:
+                    return text
         except Exception as e:
-            print(f"Error extracting text from PDF: {e}")
-            raise
+            print(f"Error extracting text with PyPDF2: {e}")
+
+        # If PyPDF2 didn't work well, try another method or external tool
+        # For example, you could call an external tool like pdftotext (from poppler-utils)
+        # or a Python library like pdf2text if available
+
+        try:
+            # Check if pdftotext is available (from poppler-utils)
+            import subprocess
+            import tempfile
+
+            # Create a temporary file for the output
+            with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as temp_file:
+                temp_output = temp_file.name
+
+            # Call pdftotext
+            try:
+                subprocess.run(['pdftotext', '-layout', file_path, temp_output],
+                               check=True, capture_output=True)
+
+                # Read the output
+                with open(temp_output, 'r', encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
+
+                print(f"pdftotext extracted {len(text)} characters from PDF")
+
+                # Clean up
+                os.unlink(temp_output)
+
+                # If we got a reasonable amount of text, return it
+                if len(text) > 100:
+                    return text
+            except subprocess.CalledProcessError:
+                print("pdftotext command failed or is not installed")
+            except FileNotFoundError:
+                print("pdftotext command not found")
+        except Exception as e:
+            print(f"Error using alternative PDF extraction: {e}")
+
+        # As a last resort, try raw binary reading with different encodings
+        try:
+            with open(file_path, 'rb') as file:
+                binary_data = file.read()
+
+                # Try different encodings
+                for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                    try:
+                        text = binary_data.decode(encoding, errors='ignore')
+                        print(f"Raw binary with {encoding} extracted {len(text)} characters")
+
+                        # If we got text that looks reasonable, return it
+                        if len(text) > 100:
+                            return text
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Error with raw binary reading: {e}")
+
+        # If we got here, we couldn't extract good text
+        # Return whatever we have, even if it's not great
+        if not text:
+            text = f"Failed to extract text from PDF: {file_path}"
+            print(text)
+
+        return text
 
     def _extract_from_docx(self, file_path: str) -> str:
         """Extract text from DOCX files."""
@@ -302,257 +493,376 @@ class OpenAIDocumentProcessor:
             print(f"Error extracting text from TXT: {e}")
             raise
 
-    def clean_document_text(self, text: str, file_path: str) -> str:
-        """Clean document text to remove artifacts and metadata."""
-        # Get file extension
-        _, file_extension = os.path.splitext(file_path)
-        file_extension = file_extension.lower()
-
-        # PDF-specific cleaning
-        if file_extension == '.pdf':
-            # Remove PDF object references (e.g., "150 0 obj", "endobj")
-            text = re.sub(r'\d+ \d+ obj.*?endobj', ' ', text, flags=re.DOTALL)
-
-            # Remove PDF streams
-            text = re.sub(r'stream\s.*?endstream', ' ', text, flags=re.DOTALL)
-
-            # Remove PDF dictionary objects (e.g., << ... >>)
-            text = re.sub(r'<<.*?>>', ' ', text, flags=re.DOTALL)
-
-            # Remove PDF operators and commands
-            text = re.sub(r'/[A-Za-z0-9_]+\s+', ' ', text)
-
-            # Remove PDF metadata like CID, CMap entries
-            text = re.sub(r'/(CID|CMap|Registry|Ordering|Supplement|CIDToGIDMap).*?def', ' ', text)
-
-            # Remove "R" references
-            text = re.sub(r'\d+ \d+ R', ' ', text)
-
-            # Remove EvoPdf artifacts
-            text = re.sub(r'EvoPdf_[a-zA-Z0-9_]+', '', text)
-
-        # General cleaning for all document types
-
-        # Replace multiple whitespace with single space
-        text = re.sub(r'\s+', ' ', text)
-
-        # Remove any lines that are just numbers (page numbers, etc.)
-        text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
-
-        return text
-
     def process_document(self, file_path: str, doc_id: str) -> Dict[str, Any]:
-        """Process a legal document and prepare it for storage and analysis."""
-        print(f"Processing legal document: {file_path}, ID: {doc_id}")
+        """Process a document using CrewAI with improved PDF handling."""
+        print(f"Processing document: {file_path}, ID: {doc_id}")
 
-        # Extract text from document
+        # Check if file exists and has content
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        if os.path.getsize(file_path) == 0:
+            raise ValueError(f"File is empty: {file_path}")
+
+        # Extract text with improved PDF handling
         text = self.extract_text(file_path)
-        print(f"Extracted text length: {len(text)} characters")
+
+        # Verify we have text
+        if not text or len(text) < 10:
+            print(f"Warning: Very little text extracted from {file_path}. File may be corrupted or unreadable.")
+            text = f"[Unable to extract meaningful text from: {file_path}]"
+
+        # Log information about the extracted text
+        print(f"Extracted {len(text)} characters from document")
+        print(f"Text preview: {text[:200]}...")
+
+        # Clean the text of potential PDF artifacts
+        text = self._clean_pdf_artifacts(text)
+        print(f"After cleaning, text length: {len(text)} characters")
 
         # Split text into chunks
-        print("Splitting text into chunks for legal analysis...")
         chunks = self.text_splitter.split_text(text)
-        print(f"Created {len(chunks)} chunks")
+        print(f"Split text into {len(chunks)} chunks")
 
         # Prepare metadata
-        print("Preparing legal document metadata...")
         metadatas = [{"source": file_path, "doc_id": doc_id, "chunk": i} for i in range(len(chunks))]
 
         # Prepare IDs
-        print("Preparing IDs...")
         ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
+
+        # Create task for document processing using the tasks.yaml
+        try:
+            # Create a simpler task description directly
+            description = f"Process the document with ID {doc_id} and prepare it for analysis."
+
+            if "document_processor" not in self.agents:
+                self.agents["document_processor"] = self._create_agent("document_processor")
+
+            process_task = Task(
+                description=description,
+                expected_output="Processed document metadata",
+                agent=self.agents["document_processor"]
+            )
+
+            # Create crew for processing
+            crew = Crew(
+                agents=[self.agents["document_processor"]],
+                tasks=[process_task],
+                verbose=True,
+                process=Process.sequential
+            )
+
+            # Execute the crew
+            crew_result = crew.kickoff()
+            print(f"CrewAI processing result: {crew_result}")
+        except Exception as e:
+            print(f"Warning: Error in CrewAI processing: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue with basic processing even if CrewAI fails
+            crew_result = f"Document processed without CrewAI: {e}"
 
         return {
             "text": text,
             "chunks": chunks,
             "metadatas": metadatas,
             "ids": ids,
-            "doc_id": doc_id
+            "doc_id": doc_id,
+            "crew_result": crew_result
         }
 
-    def _call_openai_api(self, prompt: str) -> str:
-        """Call OpenAI API with the given prompt."""
+    def _clean_pdf_artifacts(self, text: str) -> str:
+        """Clean PDF artifacts from extracted text."""
+        # Remove PDF object references
+        text = re.sub(r'\d+ \d+ obj.*?endobj', ' ', text, flags=re.DOTALL)
+
+        # Remove PDF streams
+        text = re.sub(r'stream\s.*?endstream', ' ', text, flags=re.DOTALL)
+
+        # Remove PDF dictionary objects
+        text = re.sub(r'<<.*?>>', ' ', text, flags=re.DOTALL)
+
+        # Remove PDF operators and commands
+        text = re.sub(r'/[A-Za-z0-9_]+\s+', ' ', text)
+
+        # Remove PDF metadata like CID, CMap entries
+        text = re.sub(r'/(CID|CMap|Registry|Ordering|Supplement|CIDToGIDMap).*?def', ' ', text)
+
+        # Remove "R" references
+        text = re.sub(r'\d+ \d+ R', ' ', text)
+
+        # Remove common PDF artifacts
+        text = re.sub(r'EvoPdf_[a-zA-Z0-9_]+', '', text)
+
+        # Replace multiple whitespace with single space
+        text = re.sub(r'\s+', ' ', text)
+
+        return text
+
+    def summarize(self, text: str, max_length: int = 2500) -> str:
+        """Summarize text using CrewAI."""
+        print(f"Summarizing text, length: {len(text)} characters")
+
+        # Limit text to avoid token limits
+        truncated_text = text[:max_length * 2] if len(text) > max_length * 2 else text
+
         try:
-            print(f"Calling OpenAI API with model: {self.model_name}")
-            response = openai.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system",
-                     "content": "You are a legal expert assistant specialized in analyzing legal documents."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=4000
+            # Load task configuration
+            if "summarize_document" not in self.tasks_config:
+                raise ValueError("Task 'summarize_document' not found in configuration")
+
+            task_config = self.tasks_config["summarize_document"]
+
+            # Get agent type
+            agent_type = task_config.get("agent", "document_summarizer")
+
+            # Get or create agent
+            if agent_type not in self.agents:
+                self.agents[agent_type] = self._create_agent(agent_type)
+
+            # Format the description - directly insert doc_text to avoid context issues
+            description = task_config.get("description", "")
+            description = description.replace("{doc_text}", truncated_text)
+            if "{max_length}" in description:
+                description = description.replace("{max_length}", str(max_length))
+
+            # Create task without context (which appears to be the issue)
+            summarize_task = Task(
+                description=description,
+                expected_output=task_config.get("expected_output", ""),
+                agent=self.agents[agent_type]
+                # No context parameter!
             )
-            return response.choices[0].message.content
+
+            # Create crew for summarization
+            crew = Crew(
+                agents=[self.agents[agent_type]],
+                tasks=[summarize_task],
+                verbose=True,
+                process=Process.sequential
+            )
+
+            # Execute the crew
+            result = crew.kickoff()
+
+            # Convert CrewOutput to string
+            summary_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
+
+            return summary_text
         except Exception as e:
-            error_msg = f"Error calling OpenAI API: {str(e)}"
-            print(error_msg)
-            # Add more detailed error information for debugging custom endpoints
-            if "api_base" in str(e) or "endpoint" in str(e) or "URL" in str(e) or "host" in str(e):
-                error_msg += "\nPossible API endpoint configuration issue. Please check your API settings."
-            elif "model" in str(e) or "engine" in str(e):
-                error_msg += "\nPossible model configuration issue. The specified model may not exist or you may not have access to it."
-            elif "key" in str(e) or "authorization" in str(e) or "auth" in str(e):
-                error_msg += "\nPossible API key issue. Please check that your API key is valid and has appropriate permissions."
-            return error_msg
-
-    def summarize(self, text: str, max_length: int = None) -> str:
-        """Summarize legal text using OpenAI."""
-        print(f"Summarizing legal text, length: {len(text)} characters")
-        if max_length is None:
-            max_length = self.max_length
-
-        # Limit text to max_length
-        if len(text) > max_length:
-            print(f"Text too long, truncating to {max_length} characters")
-            text = text[:max_length]
-
-        # Prepare prompt for legal summarization
-        prompt = f"""
-        Please provide a concise legal summary of the following document:
-
-        {text}
-
-        Focus specifically on:
-        1. The type of legal document (contract, agreement, policy, etc.)
-        2. Parties involved and their legal responsibilities
-        3. Key legal provisions, obligations, and rights
-        4. Important deadlines or dates
-        5. Legal remedies and dispute resolution mechanisms
-        6. Governing law and jurisdiction
-        7. Any unusual or potentially problematic legal terms
-
-        Format the summary with appropriate legal terminology and structure.
-        """
-
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal summarization, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+            print(f"Error in summarize method: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to a simple summary if CrewAI fails
+            return f"Error generating summary: {str(e)}"
 
     def analyze(self, text: str, analysis_depth: str = "detailed") -> str:
-        """Analyze legal text using OpenAI."""
-        print(f"Analyzing legal text, length: {len(text)} characters, depth: {analysis_depth}")
+        """Analyze text using CrewAI."""
+        print(f"Analyzing text, length: {len(text)} characters, depth: {analysis_depth}")
 
-        # Limit text to max_length
-        if len(text) > self.max_length:
-            print(f"Text too long, truncating to {self.max_length} characters")
-            text = text[:self.max_length]
+        # Limit text to avoid token limits
+        truncated_text = text[:5000] if len(text) > 5000 else text
 
-        # Prepare prompt for legal analysis
-        prompt = f"""
-        Please perform a {analysis_depth} legal analysis of the following document:
+        try:
+            # Load task configuration
+            if "analyze_document" not in self.tasks_config:
+                raise ValueError("Task 'analyze_document' not found in configuration")
 
-        {text}
+            task_config = self.tasks_config["analyze_document"]
 
-        Identify and extract the following elements:
-        1. Document type and purpose
-        2. Parties and their legal roles
-        3. Key legal provisions
-        4. Legal obligations for each party
-        5. Legal rights for each party
-        6. Defined terms and their legal implications
-        7. Liability clauses and risk allocation
-        8. Termination provisions
-        9. Governing law and jurisdiction
-        10. Dispute resolution mechanisms
-        11. Potential legal risks or issues
-        12. Unusual or non-standard legal provisions
-        13. Legal enforceability considerations
+            # Get agent type
+            agent_type = task_config.get("agent", "legal_analyzer")
 
-        Format your response in a structured manner using appropriate legal terminology.
-        """
+            # Get or create agent
+            if agent_type not in self.agents:
+                self.agents[agent_type] = self._create_agent(agent_type)
 
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal analysis, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+            # Format the description directly - avoid using context
+            description = task_config.get("description", "")
+            description = description.replace("{doc_text}", truncated_text)
+            description = description.replace("{analysis_depth}", analysis_depth)
+            if "{doc_id}" in description:
+                description = description.replace("{doc_id}", "current")
 
-    def compare_documents(self, texts: List[str], focus_areas: List[str]) -> str:
-        """Compare multiple legal documents using OpenAI."""
-        print(f"Comparing {len(texts)} legal documents, focus areas: {focus_areas}")
+            # Create task without context parameter
+            analyze_task = Task(
+                description=description,
+                expected_output=task_config.get("expected_output", ""),
+                agent=self.agents[agent_type]
+                # No context parameter!
+            )
 
-        # Prepare prompt for legal comparison
-        prompt = f"""
-        Please compare the following legal documents, focusing on {', '.join(focus_areas)}:
+            # Create crew for analysis
+            crew = Crew(
+                agents=[self.agents[agent_type]],
+                tasks=[analyze_task],
+                verbose=True,
+                process=Process.sequential
+            )
 
-        """
+            # Execute the crew
+            result = crew.kickoff()
 
-        for i, text in enumerate(texts):
-            # Limit each text to max_length / number of documents
-            max_text_length = self.max_length // len(texts)
-            if len(text) > max_text_length:
-                print(f"Document {i + 1} too long, truncating to {max_text_length} characters")
-                text = text[:max_text_length]
+            # Convert CrewOutput to string
+            analysis_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
 
-            prompt += f"\nDocument {i + 1}:\n{text}\n"
-
-        prompt += f"""
-        Provide a detailed legal comparison highlighting key similarities and differences
-        in the following areas: {', '.join(focus_areas)}.
-
-        Specifically analyze:
-        1. Which document provides more favorable terms for each party
-        2. Differences in legal obligations and rights
-        3. Differences in risk allocation and liability
-        4. Variations in legal remedies and dispute resolution
-        5. Potential legal conflicts between the documents
-
-        Format your analysis with clear legal reasoning and appropriate legal terminology.
-        """
-
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal comparison, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+            return analysis_text
+        except Exception as e:
+            print(f"Error in analyze method: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to a simple analysis if CrewAI fails
+            return f"Error generating analysis: {str(e)}"
 
     def compare_with_summaries(self, new_text: str, summaries: List[Dict[str, Any]],
                                focus_areas: List[str] = None) -> str:
-        """Compare a new legal document with existing legal summaries."""
-        print(f"Comparing new legal document with {len(summaries)} existing summaries")
+        """Compare a new document with existing summaries using CrewAI."""
+        print(f"Comparing new document with {len(summaries)} existing summaries")
 
         if not focus_areas:
             focus_areas = ["legal provisions", "obligations", "rights", "liability", "termination", "jurisdiction"]
 
-        # Summarize the new document first
-        new_summary = self.summarize(new_text)
+        # Limit text to avoid token limits
+        truncated_new_text = new_text[:3000] if len(new_text) > 3000 else new_text
 
-        # Prepare prompt for comparison
-        prompt = f"""
-        Please compare this new legal document:
+        try:
+            # Prepare summaries text
+            summaries_text = "\n\n".join(
+                [f"DOCUMENT {i + 1} (ID: {summary.get('doc_id', f'doc_{i + 1}')}): {summary.get('text', '')}"
+                 for i, summary in enumerate(summaries)])
 
-        NEW DOCUMENT SUMMARY:
-        {new_summary}
+            # Limit summaries text length
+            truncated_summaries_text = summaries_text[:5000] if len(summaries_text) > 5000 else summaries_text
 
-        With the following existing legal document summaries:
+            # Create description directly without using task configuration
+            description = "Compare the following legal documents, focusing on: " + ", ".join(focus_areas) + ". "
+            description += "Identify key similarities and differences in legal terms, obligations, and rights. "
+            description += "Provide a well-structured analysis that highlights important legal distinctions. "
+            description += f"Document IDs: {','.join([summary.get('doc_id', f'doc_{i}') for i, summary in enumerate(summaries)])}\n\n"
+            description += f"NEW DOCUMENT TEXT:\n{truncated_new_text}\n\n"
+            description += f"EXISTING DOCUMENT SUMMARIES:\n{truncated_summaries_text}"
 
-        """
+            # Create agent and task directly
+            if "document_comparer" not in self.agents:
+                self.agents["document_comparer"] = self._create_agent("document_comparer")
 
-        for i, summary in enumerate(summaries):
-            doc_id = summary.get("doc_id", f"doc_{i + 1}")
-            summary_text = summary.get("text", "")
+            compare_task = Task(
+                description=description,
+                expected_output="A comprehensive legal comparison highlighting key similarities and differences",
+                agent=self.agents["document_comparer"]
+            )
 
-            # Limit each summary if needed
-            max_text_length = (self.max_length // (len(summaries) + 1))
-            if len(summary_text) > max_text_length:
-                print(f"Summary {i + 1} too long, truncating")
-                summary_text = summary_text[:max_text_length]
+            # Create crew for comparison
+            crew = Crew(
+                agents=[self.agents["document_comparer"]],
+                tasks=[compare_task],
+                verbose=True,
+                process=Process.sequential
+            )
 
-            prompt += f"\nEXISTING DOCUMENT {i + 1} (ID: {doc_id}):\n{summary_text}\n"
+            # Execute the crew
+            result = crew.kickoff()
 
-        prompt += f"""
-        Please provide a detailed legal comparison focusing on:
-        1. Legal similarities between the new document and each existing document
-        2. Legal conflicts or contradictions between provisions in the new document and existing documents
-        3. Unique legal elements in the new document not found in existing documents
-        4. Specific {', '.join(focus_areas)} that overlap or conflict
-        5. Legal risk assessment of inconsistencies between documents
-        6. Which document provides more favorable terms for each party
+            # Convert CrewOutput to string
+            comparison_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
 
-        Be specific about which document ID contains conflicting or similar legal provisions.
-        Use appropriate legal terminology and structure your analysis in a legally meaningful way.
-        """
+            # Format the output if it looks like JSON
+            if comparison_text.strip().startswith('{') or comparison_text.strip().startswith('['):
+                try:
+                    import json
+                    data = json.loads(comparison_text)
 
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal summary comparison, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+                    # Convert JSON to a more readable format
+                    formatted_text = "# Document Comparison Results\n\n"
+
+                    # Format according to expected structure
+                    if isinstance(data, dict):
+                        if "similarities" in data:
+                            formatted_text += "## Similarities\n\n"
+                            for item in data["similarities"]:
+                                formatted_text += f"- {item}\n"
+                            formatted_text += "\n"
+
+                        if "differences" in data:
+                            formatted_text += "## Differences\n\n"
+                            for item in data["differences"]:
+                                formatted_text += f"- {item}\n"
+                            formatted_text += "\n"
+
+                        if "analysis" in data:
+                            formatted_text += "## Analysis\n\n"
+                            formatted_text += data["analysis"]
+                            formatted_text += "\n"
+
+                        # Add any other sections
+                        for key, value in data.items():
+                            if key not in ["similarities", "differences", "analysis"]:
+                                formatted_text += f"## {key.replace('_', ' ').title()}\n\n"
+                                formatted_text += f"{value}\n\n"
+
+                    return formatted_text
+                except:
+                    # If we can't parse as JSON, return the raw string
+                    pass
+
+            return comparison_text
+        except Exception as e:
+            print(f"Error in compare_with_summaries method: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback if CrewAI fails
+            return f"Error comparing documents: {str(e)}"
+
+    def extract_legal_definitions(self, text: str) -> str:
+        """Extract and analyze legal definitions from a document."""
+        print(f"Extracting legal definitions, text length: {len(text)} characters")
+
+        # Limit text to avoid token limits
+        truncated_text = text[:5000] if len(text) > 5000 else text
+
+        try:
+            # Create description directly without using task configuration
+            description = "Extract and explain all defined legal terms from the following document text. "
+            description += "Identify inconsistencies in definitions and potential legal ambiguities. "
+            description += f"Document text: {truncated_text}"
+
+            # Create agent and task directly
+            if "legal_terminology_extractor" not in self.agents:
+                self.agents["legal_terminology_extractor"] = self._create_agent("legal_terminology_extractor")
+
+            extract_task = Task(
+                description=description,
+                expected_output="Glossary of legal terms with explanations and identified issues",
+                agent=self.agents["legal_terminology_extractor"]
+            )
+
+            # Create crew for extraction
+            crew = Crew(
+                agents=[self.agents["legal_terminology_extractor"]],
+                tasks=[extract_task],
+                verbose=True,
+                process=Process.sequential
+            )
+
+            # Execute the crew
+            result = crew.kickoff()
+
+            # Convert CrewOutput to string
+            definitions_text = str(result) if hasattr(result,
+                                                      '__str__') else "Error: Unable to convert result to string"
+
+            return definitions_text
+        except Exception as e:
+            print(f"Error in extract_legal_definitions method: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback if CrewAI fails
+            return f"Error extracting legal definitions: {str(e)}"
+
+    def extract_legal_definitions_improved(self, text: str) -> str:
+        """Extract and analyze legal definitions from a document with improved accuracy."""
+        # This is just a wrapper around extract_legal_definitions to match the API expected by the app
+        return self.extract_legal_definitions(text)
 
     def assess_legal_risks(self, text: str, risk_categories: List[str] = None) -> str:
         """Assess legal risks in a document."""
@@ -561,194 +871,170 @@ class OpenAIDocumentProcessor:
         if not risk_categories:
             risk_categories = ["contractual", "regulatory", "litigation", "intellectual property"]
 
-        # Limit text to max_length
-        if len(text) > self.max_length:
-            print(f"Text too long, truncating to {self.max_length} characters")
-            text = text[:self.max_length]
+        # Limit text to avoid token limits
+        truncated_text = text[:5000] if len(text) > 5000 else text
 
-        # Prepare prompt for risk assessment
-        prompt = f"""
-        Please assess the legal risks in the following document:
+        try:
+            # Create description directly
+            description = "Assess the legal risks in the following document text, categorizing them by "
+            description += ", ".join(risk_categories) + ". "
+            description += "Provide a risk rating (High/Medium/Low) and potential mitigation strategies for each risk. "
+            description += f"Document text: {truncated_text}"
 
-        {text}
+            # Create agent and task directly
+            if "legal_risk_assessor" not in self.agents:
+                self.agents["legal_risk_assessor"] = self._create_agent("legal_risk_assessor")
 
-        Conduct a thorough legal risk assessment focusing on these categories:
-        {', '.join(risk_categories)}
+            risk_task = Task(
+                description=description,
+                expected_output="Legal risk assessment report with risk ratings and mitigation recommendations",
+                agent=self.agents["legal_risk_assessor"]
+            )
 
-        For each identified risk:
-        1. Describe the specific risk and the relevant document section
-        2. Assess the severity (High/Medium/Low)
-        3. Assess the likelihood (High/Medium/Low)
-        4. Provide potential mitigation strategies
-        5. Identify potential legal consequences if not addressed
+            # Create crew for risk assessment
+            crew = Crew(
+                agents=[self.agents["legal_risk_assessor"]],
+                tasks=[risk_task],
+                verbose=True,
+                process=Process.sequential
+            )
 
-        Format your response as a structured legal risk assessment report.
-        """
+            # Execute the crew
+            result = crew.kickoff()
 
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal risk assessment, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+            # Convert CrewOutput to string
+            risk_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
 
-    def extract_legal_definitions(self, text: str) -> str:
-        """Extract and analyze legal definitions from a document."""
-        print(f"Extracting legal definitions, text length: {len(text)} characters")
-
-        # Limit text to max_length
-        if len(text) > self.max_length:
-            print(f"Text too long, truncating to {self.max_length} characters")
-            text = text[:self.max_length]
-
-        # Prepare prompt for definition extraction
-        prompt = f"""
-        Please extract and analyze all defined legal terms from the following document:
-
-        {text}
-
-        For each defined term:
-        1. Extract the exact definition as stated in the document
-        2. Provide the section or clause where it appears
-        3. Analyze whether the definition is clear or potentially ambiguous
-        4. Identify any inconsistencies if the term is defined or used differently elsewhere
-        5. Note any unusual or non-standard definitions that differ from common legal usage
-
-        Format your response as a legal terminology glossary with analysis.
-        """
-
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal definition extraction, model: {self.model_name}")
-        return self._call_openai_api(prompt)
-
-    def extract_legal_definitions_improved(self, text: str) -> str:
-        """Extract and analyze legal definitions from a document with improved accuracy."""
-        print(f"Extracting legal definitions with improved method, text length: {len(text)} characters")
-
-        # Limit text to max_length
-        if len(text) > self.max_length:
-            print(f"Text too long, truncating to {self.max_length} characters")
-            text = text[:self.max_length]
-
-        # Improved prompt for definition extraction
-        prompt = f"""
-        Analyze the following legal document and extract ONLY actual legal terms that are formally defined within the document.
-
-        {text}
-
-        IMPORTANT INSTRUCTIONS:
-
-        1. ONLY extract terms that are explicitly defined in the document using patterns like:
-           - "X means/refers to..."
-           - "X is defined as..."
-           - "X: [definition]"
-           - Terms appearing in a definitions section
-
-        2. IGNORE all of the following (these are NOT legal terms):
-           - PDF metadata and formatting artifacts (like CIDSystemInfo, CMapName, obj, endobj)
-           - Technical markers or identifiers (like EvoPdf_ekfbdmochonfkgfppddhjdikgnlnnfej)
-           - Random alphanumeric strings
-           - Page numbers or section markers
-
-        3. For each genuine legal term you identify:
-           - Extract the term itself
-           - Provide its exact definition from the document
-           - Note which section it appears in
-           - Analyze whether the definition is clear or ambiguous
-           - Note any inconsistencies in how the term is used elsewhere in the document
-
-        4. If you cannot find any formally defined legal terms, state: "No formal legal definitions were found in this document."
-
-        Format your response as a clean, professional legal terminology analysis that would be useful for a lawyer reviewing this document.
-        """
-
-        # Call OpenAI API
-        print(f"Calling OpenAI API for improved legal definition extraction, model: {self.model_name}")
-        result = self._call_openai_api(prompt)
-
-        # Post-process the result to catch any remaining PDF artifacts
-        result = self._post_process_legal_definitions(result)
-
-        return result
-
-    def _post_process_legal_definitions(self, text: str) -> str:
-        """Post-process the legal definitions to remove any remaining PDF artifacts."""
-
-        # Check if the response contains PDF metadata artifacts
-        pdf_artifacts = [
-            "CIDSystemInfo", "CMapName", "CMapType", "CIDToGIDMap",
-            "obj", "R", "def", "endobj", "stream", "endstream"
-        ]
-
-        # Check for PDF artifacts in the definitions
-        contains_artifacts = any(artifact in text for artifact in pdf_artifacts)
-
-        if contains_artifacts:
-            # If PDF artifacts are detected, replace the entire output with a clearer message
-            return "No formal legal definitions were found in this document. The extracted text appears to contain technical metadata rather than legal content."
-
-        return text
-
-    def analyze_governing_law(self, text: str) -> str:
-        """Analyze governing law and jurisdiction clauses."""
-        print(f"Analyzing governing law clauses, text length: {len(text)} characters")
-
-        # Limit text to max_length
-        if len(text) > self.max_length:
-            print(f"Text too long, truncating to {self.max_length} characters")
-            text = text[:self.max_length]
-
-        # Prepare prompt for governing law analysis
-        prompt = f"""
-        Please analyze the governing law and jurisdiction clauses in the following document:
-
-        {text}
-
-        Your analysis should include:
-        1. Identify the specific governing law provision(s) and exact text
-        2. Identify any jurisdiction or venue provisions and exact text
-        3. Analyze potential implications of the chosen law/jurisdiction
-        4. Identify any potential enforceability issues
-        5. Note any unusual aspects of these provisions compared to standard practice
-        6. Identify any potential conflicts with other provisions in the document
-
-        Format your response as a detailed legal analysis of these provisions.
-        """
-
-        # Call OpenAI API
-        print(f"Calling OpenAI API for governing law analysis, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+            return risk_text
+        except Exception as e:
+            print(f"Error in assess_legal_risks method: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback if CrewAI fails
+            return f"Error assessing legal risks: {str(e)}"
 
     def check_legal_compliance(self, text: str, regulatory_areas: List[str] = None) -> str:
-        """Check document for compliance with regulations in specified areas."""
+        """Check document for compliance with regulations."""
         print(f"Checking legal compliance, text length: {len(text)} characters")
 
         if not regulatory_areas:
             regulatory_areas = ["data privacy", "consumer protection", "employment", "intellectual property"]
 
-        # Limit text to max_length
-        if len(text) > self.max_length:
-            print(f"Text too long, truncating to {self.max_length} characters")
-            text = text[:self.max_length]
+        # Limit text to avoid token limits
+        truncated_text = text[:5000] if len(text) > 5000 else text
 
-        # Prepare prompt for compliance check
-        prompt = f"""
-        Please check the following document for legal compliance with regulations in these areas:
-        {', '.join(regulatory_areas)}
+        try:
+            # Create task for compliance check using the tasks.yaml
+            compliance_task = self._create_task(
+                "check_legal_compliance",
+                context={"regulatory_areas": regulatory_areas},
+                doc_text=truncated_text
+            )
 
-        Document text:
-        {text}
+            # Create crew for compliance check
+            crew = Crew(
+                agents=[self.agents.get("legal_compliance_checker", self._create_agent("legal_compliance_checker"))],
+                tasks=[compliance_task],
+                verbose=True,
+                process=Process.sequential
+            )
 
-        For each regulatory area:
-        1. Identify relevant provisions in the document related to this area
-        2. Analyze whether these provisions appear to be compliant with current regulations
-        3. Identify potential compliance gaps or issues
-        4. Suggest improvements to enhance compliance
-        5. Note any potential legal risks related to compliance in this area
+            # Execute the crew
+            result = crew.kickoff()
+            return result
+        except Exception as e:
+            print(f"Error in check_legal_compliance method: {e}")
+            # Fallback if CrewAI fails
+            return f"Error checking legal compliance: {str(e)}"
 
-        Format your response as a structured legal compliance assessment.
-        """
+    def analyze_governing_law(self, text: str) -> str:
+        """Analyze governing law and jurisdiction clauses."""
+        print(f"Analyzing governing law, text length: {len(text)} characters")
 
-        # Call OpenAI API
-        print(f"Calling OpenAI API for legal compliance check, model: {self.model_name}")
-        return self._call_openai_api(prompt)
+        # Limit text to avoid token limits
+        truncated_text = text[:5000] if len(text) > 5000 else text
+
+        try:
+            # Create task for governing law analysis using the tasks.yaml
+            law_task = self._create_task(
+                "identify_governing_law",
+                doc_text=truncated_text
+            )
+
+            # Create crew for governing law analysis
+            crew = Crew(
+                agents=[self.agents.get("legal_analyzer", self._create_agent("legal_analyzer"))],
+                tasks=[law_task],
+                verbose=True,
+                process=Process.sequential
+            )
+
+            # Execute the crew
+            result = crew.kickoff()
+            return result
+        except Exception as e:
+            print(f"Error in analyze_governing_law method: {e}")
+            # Fallback if CrewAI fails
+            return f"Error analyzing governing law: {str(e)}"
+
+
+def get_document_processor():
+    """Get the OpenAI document processor based on settings."""
+    # Check for OpenAI configuration
+    config_path = "config/settings.json"
+    api_key = None
+
+    # First check environment variable
+    if os.environ.get("OPENAI_API_KEY"):
+        api_key = os.environ.get("OPENAI_API_KEY")
+        print("Using API key from environment variable")
+
+    # Then check settings file
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                settings = json.load(f)
+
+                # If we didn't get a key from environment, try settings
+                if not api_key and settings.get("openai_api_key"):
+                    api_key = settings.get("openai_api_key")
+                    print("Using API key from settings file")
+
+                # Get endpoint and model
+                endpoint = settings.get("openai_endpoint", "https://api.openai.com/v1")
+                model = settings.get("openai_model", "gpt-4o")
+        else:
+            # Default values if no settings file
+            endpoint = "https://api.openai.com/v1"
+            model = "gpt-4o"
+            print("No settings file found, using defaults")
+
+        # Final check for API key
+        if not api_key:
+            # One more attempt to get from session state if code is running in streamlit
+            try:
+                import streamlit as st
+                if 'openai_api_key' in st.session_state and st.session_state.openai_api_key:
+                    api_key = st.session_state.openai_api_key
+                    print("Using API key from session state")
+            except:
+                pass
+
+        # Check if we have an API key
+        if not api_key:
+            raise ValueError("No OpenAI API key found in settings, environment variables, or session state.")
+
+        # Create the processor
+        print(f"Creating CrewAI processor with endpoint: {endpoint}, model: {model}")
+        return CrewAIDocumentProcessor(
+            api_key=api_key,
+            base_url=endpoint,
+            model=model
+        )
+    except Exception as e:
+        print(f"Error setting up OpenAI document processor: {e}")
+        raise ValueError(
+            f"Unable to initialize OpenAI document processor: {e}. Please configure an OpenAI API key in the Settings tab.")
 
 
 def load_yaml_file(file_path: str) -> Dict[str, Any]:
@@ -768,7 +1054,7 @@ def process_documents():
     """Process all legal documents in the contracts folder."""
     print("\n========== STARTING LEGAL DOCUMENT PROCESSING ==========\n")
 
-    # Set up tools
+    # Set up storage
     print("Setting up ChromaDB storage...")
     chroma_storage = ChromaDBStorage(
         db_path="./chromadb",
@@ -776,41 +1062,13 @@ def process_documents():
         summaries_collection="document_summaries"
     )
 
-    print("Setting up OpenAI document processor...")
-
-    # Check for OpenAI API key in environment variables
-    api_key = os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        print(
-            "WARNING: OPENAI_API_KEY environment variable not found. You'll need to set this for the OpenAI API to work.")
-
-    # Get custom settings if available (in Streamlit context)
-    api_model = os.environ.get('OPENAI_API_MODEL', "gpt-4o-latest")  # Default
-    api_endpoint = os.environ.get('OPENAI_API_BASE')  # Default
-
-    # Check if running in Streamlit context and get settings
-    try:
-        import streamlit as st
-        if 'api_model' in st.session_state:
-            api_model = st.session_state.api_model
-            print(f"Using custom model from session state: {api_model}")
-
-        if 'api_endpoint' in st.session_state:
-            api_endpoint = st.session_state.api_endpoint
-            print(f"Using custom API endpoint from session state: {api_endpoint}")
-    except:
-        # Not running in Streamlit context
-        print("Not running in Streamlit context, using environment variables or defaults")
-
-    document_processor = OpenAIDocumentProcessor(
-        model_name=api_model,
-        max_length=5000,
-        api_key=api_key,
-        api_base=api_endpoint
-    )
+    # Get the appropriate document processor based on settings
+    document_processor = get_document_processor()
+    processor_type = document_processor.__class__.__name__
+    print(f"Using document processor: {processor_type}")
 
     # Process all documents in the contracts folder
-    contracts_folder = "contracts"
+    contracts_folder = "/home/cdsw/02_application/contracts"
     print(f"Processing legal documents from: {os.path.abspath(contracts_folder)}")
 
     # Create contracts folder if it doesn't exist
@@ -928,10 +1186,6 @@ def process_documents():
     print(f"Successfully processed {len(all_results)} out of {len(contract_files)} legal documents.")
     print(f"Results saved to the 'results' folder.")
     print(f"Document chunks and summaries stored in ChromaDB.")
-
-    # Removed the code that creates the comparison script
-    if len(all_results) > 1:
-        print("\nMultiple legal documents were processed. You can compare them using the web interface.")
 
     print("\n========== LEGAL DOCUMENT PROCESSING COMPLETED ==========\n")
     return all_results
