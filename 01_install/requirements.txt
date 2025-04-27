@@ -10,4 +10,3 @@ crewai
 matplotlib
 numpy
 pandas
-hf_xet

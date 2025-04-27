@@ -55,10 +55,23 @@ import json
 from crewai import Agent, Task, Crew, Process
 from langchain_openai import ChatOpenAI
 import logging
+
 logging.basicConfig(level=logging.INFO)
 os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
+
+# Ensure all required base directories exist
+for directory in [
+    "/home/cdsw/02_application",
+    "/home/cdsw/02_application/contracts",
+    "/home/cdsw/02_application/chromadb",
+    "/home/cdsw/02_application/results",
+    "/home/cdsw/02_application/model_cache"
+]:
+    os.makedirs(directory, exist_ok=True)
+    logging.info(f"Ensured directory exists: {directory}")
+
 sys.path.append(('/home/cdsw/02_application/main.py'))
-from main import ChromaDBStorage, process_documents, get_document_processor, summarize_document,
+from main import ChromaDBStorage, process_documents, get_document_processor
 
 # Set page config first - must be the first Streamlit command
 st.set_page_config(
@@ -120,6 +133,7 @@ def add_status_message(message, message_type="info"):
         "timestamp": timestamp
     })
 
+
 def ensure_string(obj):
     """Convert an object to string if it's not a string already."""
     if isinstance(obj, str):
@@ -128,6 +142,7 @@ def ensure_string(obj):
         return str(obj)
     else:
         return f"[Object of type {type(obj).__name__}]"
+
 
 def ensure_api_key():
     """Ensure API key is set before processing documents."""
@@ -342,6 +357,7 @@ def find_similar_documents(processed_doc, max_results=5, similarity_threshold=0.
 
     return similar_docs
 
+
 def get_document_summary(doc_id):
     """Get the summary for a legal document."""
     chroma_storage = ChromaDBStorage(
@@ -355,7 +371,6 @@ def get_document_summary(doc_id):
 
 
 @handle_openai_error
-@handle_openai_error
 def compare_documents(new_doc, selected_docs):
     """Compare the new document with selected documents."""
     # Double check that API key is set
@@ -366,29 +381,88 @@ def compare_documents(new_doc, selected_docs):
     # Get document processor
     document_processor = get_document_processor()
 
-    # Get text from the new document
+    # Get text from the new document - IMPROVED TEXT EXTRACTION
     try:
-        with open(new_doc["file_path"], 'r', encoding='utf-8', errors='ignore') as f:
-            new_text = f.read()
+        file_path = new_doc["file_path"]
+        print(f"Attempting to read document: {file_path}")
 
-        # Debug info
-        print(f"Loaded text from {new_doc['file_path']}, length: {len(new_text)} chars")
-        print(f"Text preview: {new_text[:100]}...")
+        # Check if file exists
+        if not os.path.exists(file_path):
+            error_msg = f"File not found: {file_path}"
+            print(error_msg)
+            return error_msg
 
-        if len(new_text) < 10:
-            # Try with binary mode if text mode didn't work
-            with open(new_doc["file_path"], 'rb') as f:
-                binary_data = f.read()
-                new_text = binary_data.decode('utf-8', errors='ignore')
-                print(f"Loaded binary text, length: {len(new_text)} chars")
+        # Determine file extension
+        _, file_extension = os.path.splitext(file_path)
+        file_extension = file_extension.lower()
+        print(f"File extension: {file_extension}")
+
+        # Use the document processor's extract_text method if it's a PDF or DOCX
+        if file_extension in ['.pdf', '.docx']:
+            print(f"Using document processor to extract text from {file_extension} file")
+            try:
+                new_text = document_processor.extract_text(file_path)
+                print(f"Extracted text with document processor, length: {len(new_text)} chars")
+            except Exception as e:
+                print(f"Error using document processor extraction: {e}")
+                # Fall back to basic extraction
+                new_text = None
+        else:
+            new_text = None
+
+        # If the document processor couldn't extract text, try simple text reading
+        if not new_text or len(new_text) < 10:
+            print("Falling back to basic text extraction")
+            try:
+                # Try text mode first
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    new_text = f.read()
+                print(f"Read text in text mode, length: {len(new_text)} chars")
+            except Exception as e:
+                print(f"Error reading in text mode: {e}")
+                new_text = None
+
+            # If text mode didn't work or got very little text, try binary mode
+            if not new_text or len(new_text) < 10:
+                try:
+                    with open(file_path, 'rb') as f:
+                        binary_data = f.read()
+
+                    # Try different encodings
+                    for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                        try:
+                            new_text = binary_data.decode(encoding, errors='ignore')
+                            print(f"Decoded binary using {encoding}, length: {len(new_text)} chars")
+                            if len(new_text) > 10:
+                                break
+                        except:
+                            continue
+                except Exception as e:
+                    print(f"Error reading in binary mode: {e}")
+                    return f"Error extracting text from document: {e}"
+
+        # Clean the document text
+        if new_text and len(new_text) > 10:
+            print("Cleaning document text")
+            cleaned_text = clean_document_text(new_text, file_path)
+            print(f"Cleaned text length: {len(cleaned_text)} chars")
+            print(f"Cleaned text preview: {cleaned_text[:200]}...")
+            new_text = cleaned_text
+
+        # Check if we have text to compare
+        if not new_text or len(new_text) < 10:
+            print("Warning: Extracted very little or no text")
+            return "Error: Could not extract meaningful text from the uploaded document. The file may be corrupted or in an unsupported format."
+
+        print(f"Successfully extracted text, length: {len(new_text)} chars")
+        print(f"Text preview: {new_text[:200]}...")
+
     except Exception as e:
         error_msg = f"Error reading file {new_doc['file_path']}: {e}"
         print(error_msg)
+        import traceback
+        print(traceback.format_exc())
         return error_msg
-
-    # Check if we have text to compare
-    if not new_text or len(new_text) < 10:
-        return "Error: Could not extract meaningful text from the uploaded document. The file may be corrupted or in an unsupported format."
 
     # Get summaries for selected documents
     summaries = []
@@ -429,6 +503,8 @@ def compare_documents(new_doc, selected_docs):
     # Check if we have summaries to compare with
     if not summaries:
         return "Error: No document summaries found to compare with. Please select at least one document for comparison."
+
+    print(f"Comparing with {len(summaries)} document summaries")
 
     # Compare documents
     comparison_result = document_processor.compare_with_summaries(
@@ -523,6 +599,7 @@ def format_comparison_json(data):
 
     # Default fallback
     return str(data)
+
 
 @handle_openai_error
 def extract_legal_definitions(doc_id):
@@ -722,6 +799,8 @@ def check_database_has_documents():
         return False
     except Exception as e:
         st.error(f"Error checking database: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return False
 
 
@@ -730,9 +809,77 @@ def run_initial_processing():
     try:
         add_status_message("No documents found in the database. Running initial document processing...", "info")
 
+        # Ensure all required directories exist
+        for directory in [
+            "/home/cdsw/02_application",
+            "/home/cdsw/02_application/contracts",
+            "/home/cdsw/02_application/chromadb",
+            "/home/cdsw/02_application/results",
+            "/home/cdsw/02_application/model_cache"
+        ]:
+            os.makedirs(directory, exist_ok=True)
+            add_status_message(f"Ensured directory exists: {directory}", "info")
+
+        # Create a sample contract if none exist
+        contracts_folder = "/home/cdsw/02_application/contracts"
+        try:
+            dir_contents = os.listdir(contracts_folder)
+            add_status_message(f"Contracts directory contents: {dir_contents}", "info")
+
+            if not any(f.endswith(('.pdf', '.docx', '.txt')) for f in dir_contents):
+                add_status_message("No contract files found. Creating a sample contract...", "info")
+
+                # Create a sample contract file
+                sample_file = os.path.join(contracts_folder, "sample_contract.txt")
+                with open(sample_file, 'w') as f:
+                    f.write("""Sample Contract
+
+This is a sample contract document created for testing purposes.
+
+TERMS AND CONDITIONS:
+1. This is a test document.
+2. It contains some sample legal text.
+3. It should be detected by the document processing system.
+
+Signed: _________________
+Date: ___________________
+""")
+                add_status_message(f"Created sample contract: {sample_file}", "success")
+
+                # Verify the file was created
+                if os.path.exists(sample_file):
+                    add_status_message(f"Verified sample contract exists: {sample_file}", "success")
+                else:
+                    add_status_message(f"Sample contract was not created successfully.", "warning")
+        except Exception as e:
+            add_status_message(f"Error checking or creating contracts: {e}", "error")
+            # Try creating the directory again
+            os.makedirs(contracts_folder, exist_ok=True)
+
+            # Try alternate approach - absolute path
+            try:
+                sample_file = "/home/cdsw/02_application/contracts/sample_contract.txt"
+                with open(sample_file, 'w') as f:
+                    f.write("Sample Contract\n\nThis is a test contract.\n")
+                add_status_message(f"Created sample contract with absolute path", "success")
+            except Exception as e2:
+                add_status_message(f"Still failed to create sample contract: {e2}", "error")
+
+        # List directory contents for debugging
+        try:
+            dir_contents = os.listdir(contracts_folder)
+            add_status_message(f"Contracts directory contents after preparation: {dir_contents}", "info")
+        except Exception as e:
+            add_status_message(f"Error listing contracts directory: {e}", "error")
+
         # Call the process_documents function directly
         with st.spinner("Processing legal documents in 'contracts' folder. This may take a while..."):
-            process_documents()
+            result = process_documents()
+
+            if not result:
+                add_status_message("No documents were processed. Check for errors above.", "warning")
+            else:
+                add_status_message(f"Successfully processed {len(result)} documents", "success")
 
         add_status_message("Initial document processing completed!", "success")
         return True
@@ -742,6 +889,7 @@ def run_initial_processing():
         import traceback
         add_status_message(traceback.format_exc(), "error")
         return False
+
 
 def create_risk_matrix(risks):
     """Create a risk matrix visualization for legal risks."""
@@ -896,6 +1044,7 @@ def display_legal_definitions(definitions_text):
         with st.expander(term):
             st.write(section)
 
+
 def save_settings_to_file():
     """Save current settings to a JSON file."""
     settings = {
@@ -946,7 +1095,8 @@ def test_crewai_connection():
             return {"success": False, "message": "API key is required"}
 
         # Log for debugging
-        logging.info(f"Testing CrewAI connection with API key: {'*' * 5}{st.session_state.openai_api_key[-4:] if st.session_state.openai_api_key else 'None'}")
+        logging.info(
+            f"Testing CrewAI connection with API key: {'*' * 5}{st.session_state.openai_api_key[-4:] if st.session_state.openai_api_key else 'None'}")
         logging.info(f"Using model: {st.session_state.openai_model}")
         logging.info(f"Using endpoint: {st.session_state.openai_endpoint}")
 
@@ -1013,8 +1163,23 @@ def check_environment():
 
     # Check other critical settings
     logging.info(f"Current working directory: {os.getcwd()}")
-    logging.info(f"Agents YAML exists: {os.path.exists('agents.yaml')}")
-    logging.info(f"Tasks YAML exists: {os.path.exists('tasks.yaml')}")
+    for directory in ["/home/cdsw/02_application",
+                      "/home/cdsw/02_application/contracts",
+                      "/home/cdsw/02_application/chromadb",
+                      "/home/cdsw/02_application/results"]:
+        logging.info(f"Directory exists: {directory} - {os.path.exists(directory)}")
+        if os.path.exists(directory):
+            try:
+                files = os.listdir(directory)
+                logging.info(f"Contents of {directory}: {files}")
+            except Exception as e:
+                logging.error(f"Error listing directory {directory}: {e}")
+
+    # Check for configuration files
+    agents_yaml = "/home/cdsw/02_application/agents.yaml"
+    tasks_yaml = "/home/cdsw/02_application/tasks.yaml"
+    logging.info(f"Agents YAML exists: {os.path.exists(agents_yaml)}")
+    logging.info(f"Tasks YAML exists: {os.path.exists(tasks_yaml)}")
 
     # Check for ChromaDB
     chroma_path = "/home/cdsw/02_application/chromadb"
@@ -1031,6 +1196,7 @@ def main():
 
     # Add debugging information
     check_environment()
+
 
 def load_yaml_file(file_path: str):
     """Load YAML file."""
@@ -1136,6 +1302,71 @@ def display_settings_tab():
                 else:
                     st.error(f"Connection failed: {test_result['message']}")
 
+    with st.expander("System Diagnosis", expanded=True):
+        st.info("Diagnose and fix system issues")
+
+        if st.button("Run System Diagnostic"):
+            st.subheader("Directory Structure")
+
+            # Check required directories
+            for directory in ["/home/cdsw/02_application",
+                              "/home/cdsw/02_application/contracts",
+                              "/home/cdsw/02_application/chromadb",
+                              "/home/cdsw/02_application/results"]:
+                if os.path.exists(directory):
+                    st.success(f"✅ Directory exists: {directory}")
+                    try:
+                        files = os.listdir(directory)
+                        if files:
+                            st.write(f"Contents: {', '.join(files)}")
+                        else:
+                            st.warning(f"Directory is empty: {directory}")
+                    except Exception as e:
+                        st.error(f"Cannot list directory: {directory} - {e}")
+                else:
+                    st.error(f"❌ Directory does not exist: {directory}")
+                    try:
+                        os.makedirs(directory, exist_ok=True)
+                        st.success(f"Created directory: {directory}")
+                    except Exception as e:
+                        st.error(f"Failed to create directory: {e}")
+
+            # Check configuration files
+            st.subheader("Configuration Files")
+            agents_yaml = "/home/cdsw/02_application/agents.yaml"
+            tasks_yaml = "/home/cdsw/02_application/tasks.yaml"
+
+            for config_file in [agents_yaml, tasks_yaml]:
+                if os.path.exists(config_file):
+                    st.success(f"✅ Config file exists: {os.path.basename(config_file)}")
+                else:
+                    st.error(f"❌ Config file missing: {os.path.basename(config_file)}")
+
+            # Create sample contract
+            st.subheader("Sample Contract")
+            if st.button("Create Sample Contract"):
+                try:
+                    contracts_folder = "/home/cdsw/02_application/contracts"
+                    os.makedirs(contracts_folder, exist_ok=True)
+
+                    sample_file = os.path.join(contracts_folder, "sample_contract.txt")
+                    with open(sample_file, 'w') as f:
+                        f.write("""Sample Contract
+
+This is a sample contract document created for testing purposes.
+
+TERMS AND CONDITIONS:
+1. This is a test document.
+2. It contains some sample legal text.
+3. It should be detected by the document processing system.
+
+Signed: _________________
+Date: ___________________
+""")
+                    st.success(f"Created sample contract: {sample_file}")
+                except Exception as e:
+                    st.error(f"Failed to create sample contract: {e}")
+
 
 ###########################################
 # STREAMLIT UI
@@ -1150,30 +1381,79 @@ def main():
     # Ensure API key is set
     ensure_api_key()
 
+    # Make sure all required directories exist
+    for directory in [
+        "/home/cdsw/02_application",
+        "/home/cdsw/02_application/contracts",
+        "/home/cdsw/02_application/chromadb",
+        "/home/cdsw/02_application/results",
+        "/home/cdsw/02_application/model_cache"
+    ]:
+        os.makedirs(directory, exist_ok=True)
+        print(f"Ensured directory exists: {directory}")
+
     # Check if there are documents in the database
     if not check_database_has_documents():
         # Check if there are documents in the contracts folder
-        contracts_folder = "contracts"
+        contracts_folder = "/home/cdsw/02_application/contracts"
         has_contracts = False
 
-        if os.path.exists(contracts_folder):
-            for root, dirs, files in os.walk(contracts_folder):
-                for filename in files:
-                    file_path = os.path.join(root, filename)
-                    ext = os.path.splitext(filename)[1].lower()
-                    if ext in ['.pdf', '.docx', '.txt']:
-                        has_contracts = True
+        try:
+            if os.path.exists(contracts_folder):
+                for root, dirs, files in os.walk(contracts_folder):
+                    for filename in files:
+                        file_path = os.path.join(root, filename)
+                        ext = os.path.splitext(filename)[1].lower()
+                        if ext in ['.pdf', '.docx', '.txt']:
+                            has_contracts = True
+                            break
+                    if has_contracts:
                         break
-                if has_contracts:
-                    break
+        except Exception as e:
+            print(f"Error checking for contracts: {e}")
+            import traceback
+            print(traceback.format_exc())
 
         if has_contracts:
             # Run initial processing if documents exist but aren't in the database
             run_initial_processing()
         else:
-            add_status_message(
-                "No legal documents found in the 'contracts' folder. Please upload documents to get started.",
-                "warning")
+            # Create a sample contract
+            try:
+                # Get directory contents first for debugging
+                dir_contents = os.listdir(contracts_folder)
+                print(f"Contracts directory contents before creating sample: {dir_contents}")
+
+                sample_file = os.path.join(contracts_folder, "sample_contract.txt")
+                with open(sample_file, 'w') as f:
+                    f.write("""Sample Contract
+
+This is a sample contract document created for testing purposes.
+
+TERMS AND CONDITIONS:
+1. This is a test document.
+2. It contains some sample legal text.
+3. It should be detected by the document processing system.
+
+Signed: _________________
+Date: ___________________
+""")
+                print(f"Created sample contract at: {sample_file}")
+
+                # Verify the file was created
+                if os.path.exists(sample_file):
+                    print(f"Sample contract file exists")
+                    run_initial_processing()
+                else:
+                    print(f"Sample contract file was not created successfully")
+                    add_status_message("Failed to create sample contract file", "error")
+            except Exception as e:
+                print(f"Error creating sample contract: {e}")
+                import traceback
+                print(traceback.format_exc())
+                add_status_message(
+                    "No legal documents found in the 'contracts' folder and failed to create a sample. Please upload documents to get started.",
+                    "warning")
 
     # Display status messages if any
     if st.session_state.status_messages:

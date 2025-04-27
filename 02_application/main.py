@@ -51,6 +51,41 @@ import PyPDF2
 from crewai import Agent, Task, Crew, Process
 from langchain_openai import ChatOpenAI
 
+# Add these imports for the SentenceTransformer fix
+import os
+import sys
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Set environment variable for SentenceTransformer cache before any imports
+# that might use it
+os.environ["TRANSFORMERS_CACHE"] = "/home/cdsw/02_application/model_cache"
+os.makedirs("/home/cdsw/02_application/model_cache", exist_ok=True)
+
+# Ensure all necessary directories exist
+for path in ["/home/cdsw/02_application",
+             "/home/cdsw/02_application/chromadb",
+             "/home/cdsw/02_application/contracts",
+             "/home/cdsw/02_application/results",
+             "/home/cdsw/02_application/model_cache"]:
+    os.makedirs(path, exist_ok=True)
+    logger.info(f"Ensured directory exists: {path}")
+
+# Try to download the model in advance
+try:
+    logger.info("Attempting to pre-download SentenceTransformer model")
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    logger.info("Successfully pre-downloaded SentenceTransformer model")
+except Exception as e:
+    logger.warning(f"Could not pre-download SentenceTransformer model: {e}")
+    logger.warning("Will fall back to DefaultEmbeddingFunction if needed")
+
 
 class ChromaDBStorage:
     """Storage for document chunks and summaries in ChromaDB."""
@@ -75,10 +110,46 @@ class ChromaDBStorage:
         print("ChromaDB client initialized")
 
         # Create embedding function - USING ONLY LOCAL MODELS
-        self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"
-        )
-        print("Embedding function created (using SentenceTransformers)")
+        try:
+            # First try to use SentenceTransformer with custom cache path
+            logger.info("Attempting to initialize SentenceTransformerEmbeddingFunction")
+            self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
+            logger.info("Successfully created embedding function using SentenceTransformers")
+            print("Embedding function created (using SentenceTransformers)")
+        except Exception as e:
+            logger.warning(f"Failed to load SentenceTransformer: {e}")
+            print(f"Warning: Failed to load SentenceTransformer: {e}")
+
+            # Try to install sentence-transformers if not already installed
+            try:
+                logger.info("Attempting to install sentence-transformers package")
+                import subprocess
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "sentence-transformers", "--no-cache-dir"])
+                logger.info("Successfully installed sentence-transformers package")
+
+                # Try again with the newly installed package
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    logger.info("Attempting to initialize SentenceTransformer after installation")
+                    self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                        model_name="all-MiniLM-L6-v2"
+                    )
+                    logger.info("Successfully created embedding function after installation")
+                    print("Embedding function created (using SentenceTransformers after installation)")
+                except Exception as e2:
+                    logger.warning(f"Still failed to load SentenceTransformer after installation: {e2}")
+                    print(f"Still failed after installation: {e2}")
+                    print("Falling back to DefaultEmbeddingFunction")
+                    self.ef = embedding_functions.DefaultEmbeddingFunction()
+            except Exception as install_error:
+                logger.warning(f"Failed to install sentence-transformers: {install_error}")
+                print(f"Failed to install sentence-transformers: {install_error}")
+                print("Falling back to DefaultEmbeddingFunction")
+                # Fallback to default embedding function if SentenceTransformer fails
+                self.ef = embedding_functions.DefaultEmbeddingFunction()
 
         # Get or create chunks collection
         try:
@@ -1057,7 +1128,7 @@ def process_documents():
     # Set up storage
     print("Setting up ChromaDB storage...")
     chroma_storage = ChromaDBStorage(
-        db_path="./chromadb",
+        db_path="/home/cdsw/02_application/chromadb",
         chunks_collection="document_chunks",
         summaries_collection="document_summaries"
     )
@@ -1068,38 +1139,88 @@ def process_documents():
     print(f"Using document processor: {processor_type}")
 
     # Process all documents in the contracts folder
-    contracts_folder = "/home/cdsw/02_application/contracts"
-    print(f"Processing legal documents from: {os.path.abspath(contracts_folder)}")
+    # Try both absolute and relative paths to find contracts
+    possible_contract_paths = [
+        "/home/cdsw/02_application/contracts",
+        "contracts",
+        os.path.join(os.getcwd(), "contracts"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "contracts")
+    ]
 
-    # Create contracts folder if it doesn't exist
-    if not os.path.exists(contracts_folder):
-        print(f"Contracts folder not found, creating: {contracts_folder}")
-        os.makedirs(contracts_folder)
+    contracts_folder = None
+    for path in possible_contract_paths:
+        if os.path.exists(path):
+            contracts_folder = path
+            print(f"Found contracts folder at: {os.path.abspath(path)}")
+            break
+
+    if not contracts_folder:
+        print("Contracts folder not found in any of the expected locations:")
+        for path in possible_contract_paths:
+            print(
+                f"  - {os.path.abspath(path) if os.path.isabs(path) else os.path.abspath(os.path.join(os.getcwd(), path))}")
+
+        # Default to the standard path and create it
+        contracts_folder = "/home/cdsw/02_application/contracts"
+        print(f"Creating contracts folder at: {contracts_folder}")
+        os.makedirs(contracts_folder, exist_ok=True)
         print(f"Created {contracts_folder} directory. Please place your legal documents there and run again.")
         return
 
-    print(f"Contracts folder exists: {os.path.exists(contracts_folder)}")
+    print(f"Using contracts folder: {os.path.abspath(contracts_folder)}")
+    print(f"Current working directory: {os.getcwd()}")
+
+    # Print directory contents for debugging
+    print("\nDirectory structure:")
+    for root, dirs, files in os.walk(contracts_folder):
+        level = root.replace(contracts_folder, '').count(os.sep)
+        indent = ' ' * 4 * level
+        print(f"{indent}{os.path.basename(root)}/")
+        subindent = ' ' * 4 * (level + 1)
+        for file in files:
+            print(f"{subindent}{file}")
 
     # Get all files in the contracts folder (including subfolders)
     contract_files = []
 
-    print("Scanning for legal document files (including subfolders)...")
+    print("\nScanning for legal document files (including subfolders)...")
     for root, dirs, files in os.walk(contracts_folder):
         print(f"Scanning directory: {root}")
         for filename in files:
             file_path = os.path.join(root, filename)
             # Check if file is of supported type
             ext = os.path.splitext(filename)[1].lower()
+            print(f"Checking file: {filename} (extension: {ext})")
             if ext in ['.pdf', '.docx', '.txt']:
                 print(f"Found supported legal file: {file_path}")
                 contract_files.append(file_path)
             else:
-                print(f"Skipping unsupported file: {file_path}")
+                print(f"Skipping unsupported file: {file_path} (extension: {ext})")
 
     if not contract_files:
         print(f"No supported legal documents found in {contracts_folder} folder.")
         print("Supported formats: PDF, DOCX, TXT")
-        return
+        # Try a direct file listing as a fallback
+        print("\nAttempting direct file listing:")
+        try:
+            dir_contents = os.listdir(contracts_folder)
+            print(f"Directory contents of {contracts_folder}:")
+            for item in dir_contents:
+                item_path = os.path.join(contracts_folder, item)
+                if os.path.isfile(item_path):
+                    print(f"  File: {item}")
+                    # Check if it's a supported file but was missed somehow
+                    ext = os.path.splitext(item)[1].lower()
+                    if ext in ['.pdf', '.docx', '.txt']:
+                        print(f"  Found missed supported file: {item_path}")
+                        contract_files.append(item_path)
+                elif os.path.isdir(item_path):
+                    print(f"  Directory: {item}/")
+        except Exception as e:
+            print(f"Error listing directory: {e}")
+
+        if not contract_files:
+            return
 
     print(f"Found {len(contract_files)} legal document(s) to process:")
     for i, file_path in enumerate(contract_files):
