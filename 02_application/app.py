@@ -196,7 +196,7 @@ def save_uploaded_file(uploaded_file):
 
 
 def clean_document_text(text, file_path):
-    """Clean document text to remove artifacts and metadata."""
+    """Clean document text to remove artifacts and metadata with enhanced support for farmout agreements."""
     # Get file extension
     _, file_extension = os.path.splitext(file_path)
     file_extension = file_extension.lower()
@@ -224,6 +224,41 @@ def clean_document_text(text, file_path):
         # Remove EvoPdf artifacts
         text = re.sub(r'EvoPdf_[a-zA-Z0-9_]+', '', text)
 
+        # SEC document specific cleanup (for farmout agreements)
+        # Remove URLs that appear in SEC documents
+        text = re.sub(r'https?://www\.sec\.gov/[^\s]+', '', text)
+
+        # Remove timestamp headers that commonly appear in SEC documents
+        text = re.sub(r'\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s+[AP]M', '', text)
+
+        # Remove page numbers in various formats
+        text = re.sub(r'\n\s*\d+\s*/\s*\d+\s*\n', '\n', text)
+        text = re.sub(r'\n\s*Page\s+\d+\s+of\s+\d+\s*\n', '\n', text)
+
+        # Fix specific legal document patterns
+        # Join broken sentences (common in multi-column legal documents)
+        text = re.sub(r'([a-z])\n([a-z])', r'\1 \2', text)
+
+        # Clean exhibit markers common in legal documents
+        text = re.sub(r'Exhibit\s+\d+\.\d+', '', text)
+
+        # Clean footer identifiers common in legal documents
+        text = re.sub(r'EX-\d+\.\d+\s+\d+\s+[a-zA-Z0-9]+\.htm', '', text)
+
+        # Restore paragraph breaks for numbered sections (common in legal documents)
+        text = re.sub(r'(\d+\.\s+)', r'\n\n\1', text)
+
+        # Restore paragraph breaks for WHEREAS clauses
+        text = re.sub(r'(WHEREAS)', r'\n\n\1', text)
+
+        # Restore paragraph breaks for WITNESSETH
+        text = re.sub(r'(WITNESSETH)', r'\n\n\1', text)
+
+        # Restore paragraph breaks for common legal agreement sections
+        for legal_section in ["AGREEMENT", "CONSIDERATION", "OBLIGATIONS", "REPRESENTATIONS",
+                              "WARRANTIES", "COVENANTS", "INDEMNIFICATION", "TERMINATION"]:
+            text = re.sub(f'({legal_section}:)', r'\n\n\1', text, flags=re.IGNORECASE)
+
     # General cleaning for all document types
 
     # Replace multiple whitespace with single space
@@ -231,6 +266,20 @@ def clean_document_text(text, file_path):
 
     # Remove any lines that are just numbers (page numbers, etc.)
     text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
+
+    # Farmout agreement specific patterns
+    # Look for text that indicates this might be a farmout agreement
+    if any(term in text.lower() for term in ['farmout', 'farm-out', 'farm out']):
+        # Some patterns specific to farmout agreements
+        # Fix broken numbered clauses
+        text = re.sub(r'(\d+)\s*\.\s*([A-Z])', r'\n\1. \2', text)
+
+        # Fix common legal formatting issues
+        text = re.sub(r'IN WITNESS WHEREOF', r'\n\nIN WITNESS WHEREOF', text)
+        text = re.sub(r'NOW, THEREFORE', r'\n\nNOW, THEREFORE', text)
+
+    # Final clean-up
+    text = text.strip()
 
     return text
 
@@ -372,7 +421,7 @@ def get_document_summary(doc_id):
 
 @handle_openai_error
 def compare_documents(new_doc, selected_docs):
-    """Compare the new document with selected documents."""
+    """Compare the new document with selected documents with improved farmout agreement handling."""
     # Double check that API key is set
     if not api_key_configured and not ensure_api_key():
         st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
@@ -396,6 +445,13 @@ def compare_documents(new_doc, selected_docs):
         _, file_extension = os.path.splitext(file_path)
         file_extension = file_extension.lower()
         print(f"File extension: {file_extension}")
+
+        # Check if this might be a farmout agreement by filename
+        is_farmout = any(term in file_path.lower() for term in ['farmout', 'farm-out', 'farm out'])
+
+        # Farmout agreements often need special handling
+        if is_farmout:
+            print("Detected possible farmout agreement - using specialized extraction")
 
         # Use the document processor's extract_text method if it's a PDF or DOCX
         if file_extension in ['.pdf', '.docx']:
@@ -429,11 +485,26 @@ def compare_documents(new_doc, selected_docs):
                         binary_data = f.read()
 
                     # Try different encodings
-                    for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                    for encoding in ['utf-8', 'latin-1', 'cp1252', 'utf-16', 'ascii']:
                         try:
                             new_text = binary_data.decode(encoding, errors='ignore')
                             print(f"Decoded binary using {encoding}, length: {len(new_text)} chars")
-                            if len(new_text) > 10:
+
+                            # For farmout agreements, prioritize encodings that preserve legal terms
+                            if is_farmout:
+                                legal_term_count = sum(1 for term in [
+                                    'agreement', 'hereby', 'shall', 'party', 'contract',
+                                    'obligations', 'pursuant', 'herein', 'witness', 'whereas'
+                                ] if term.lower() in new_text.lower())
+
+                                print(f"Found {legal_term_count} legal terms in text with {encoding} encoding")
+
+                                # If we found legal terms and have decent length, use this text
+                                if legal_term_count > 0 and len(new_text) > 100:
+                                    print(f"Selected {encoding} encoding based on legal term presence")
+                                    break
+                            elif len(new_text) > 100:
+                                # For non-farmout docs, just use the first encoding that gives decent length
                                 break
                         except:
                             continue
@@ -456,6 +527,22 @@ def compare_documents(new_doc, selected_docs):
 
         print(f"Successfully extracted text, length: {len(new_text)} chars")
         print(f"Text preview: {new_text[:200]}...")
+
+        # If it's a farmout agreement, add context to help the AI model
+        if is_farmout:
+            print("Adding farmout agreement context to comparison")
+            # Add special context for farmout agreement comparison
+            farmout_context = """
+            Document appears to be a farmout agreement. When analyzing, pay special attention to:
+            - Earning provisions (what must be done to earn interests)
+            - Farmor and farmee obligations
+            - Working interest percentages before and after payout
+            - Drilling commitments (number of wells, timeframes)
+            - Assignment conditions
+            - Payment terms
+            - Termination conditions
+            """
+            new_text = farmout_context + "\n\n" + new_text
 
     except Exception as e:
         error_msg = f"Error reading file {new_doc['file_path']}: {e}"
@@ -506,11 +593,21 @@ def compare_documents(new_doc, selected_docs):
 
     print(f"Comparing with {len(summaries)} document summaries")
 
+    # For farmout agreements, include specialized focus areas
+    if is_farmout:
+        focus_areas = [
+            "legal provisions", "obligations", "rights", "liability", "termination", "jurisdiction",
+            "working interest", "farmout terms", "drilling obligations", "payout provisions",
+            "assignment conditions", "earning event"
+        ]
+    else:
+        focus_areas = ["legal provisions", "obligations", "rights", "liability", "termination", "jurisdiction"]
+
     # Compare documents
     comparison_result = document_processor.compare_with_summaries(
         new_text,
         summaries,
-        focus_areas=["legal provisions", "obligations", "rights", "liability", "termination", "jurisdiction"]
+        focus_areas=focus_areas
     )
 
     # Convert CrewOutput to string if needed
@@ -531,6 +628,7 @@ def compare_documents(new_doc, selected_docs):
             return comparison_result
 
     return comparison_result
+
 
 def format_comparison_json(data):
     """Format comparison JSON data into a readable string format."""
@@ -666,7 +764,7 @@ def extract_legal_definitions(doc_id):
 
 @handle_openai_error
 def assess_legal_risks(doc_id):
-    """Perform a legal risk assessment on a document."""
+    """Perform a legal risk assessment on a document with enhanced farmout agreement support."""
     # Double check that API key is set
     if not api_key_configured and not ensure_api_key():
         st.error("OpenAI API key is required. Please configure your API key in the Settings tab.")
@@ -681,34 +779,610 @@ def assess_legal_risks(doc_id):
         summaries_collection="document_summaries"
     )
 
-    # Get the document text
-    if doc_id.startswith("doc_"):
-        # Get the document from the database
-        summary = chroma_storage.get_summary(doc_id)
-        if not summary:
-            return "Document not found in the database."
+    # Get the document summary and metadata
+    if not doc_id.startswith("doc_"):
+        return "Invalid document ID format."
 
-        if "metadata" in summary and "source" in summary["metadata"]:
-            file_path = summary["metadata"]["source"]
+    summary = chroma_storage.get_summary(doc_id)
+    if not summary:
+        return "Document not found in the database."
+
+    # Get the document source file
+    if "metadata" not in summary or "source" not in summary["metadata"]:
+        return "Document source file information not found."
+
+    file_path = summary["metadata"]["source"]
+    filename = summary["metadata"].get("filename", os.path.basename(file_path))
+
+    print(f"Assessing risks for document: {filename}")
+
+    # Check if this might be a farmout agreement by filename or summary text
+    is_farmout = any(term in filename.lower() or term in file_path.lower()
+                     for term in ['farmout', 'farm-out', 'farm out'])
+
+    if not is_farmout and "text" in summary:
+        # Check summary text for farmout-related terms
+        is_farmout = any(term in summary["text"].lower()
+                         for term in ['farmout', 'farm-out', 'farm out', 'farmor', 'farmee',
+                                      'drilling obligation', 'working interest', 'payout'])
+
+    print(f"Document appears to be a farmout agreement: {is_farmout}")
+
+    # Get the document text using best available method
+    try:
+        # Try to use document processor first
+        if file_path and os.path.exists(file_path):
             try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    text = f.read()
-
-                # Clean the text of PDF artifacts
-                text = clean_document_text(text, file_path)
+                document_text = document_processor.extract_text(file_path)
+                print(f"Successfully extracted text using document processor: {len(document_text)} chars")
             except Exception as e:
-                return f"Error reading document: {e}"
-        else:
-            return "Document source file not found."
-    else:
-        return "Invalid document ID."
+                print(f"Error using document processor: {e}")
+                document_text = None
 
-    # Perform risk assessment
-    risk_assessment = document_processor.assess_legal_risks(
-        text,
-        risk_categories=["contractual", "regulatory", "litigation", "intellectual property"]
-    )
-    return risk_assessment
+            # If we got text, clean it
+            if document_text and len(document_text) > 200:
+                document_text = clean_document_text(document_text, file_path)
+        else:
+            document_text = None
+
+        # If document processor failed, try to read from file directly
+        if not document_text or len(document_text) < 200:
+            try:
+                if file_path and os.path.exists(file_path):
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        document_text = f.read()
+                        print(f"Read {len(document_text)} chars from file directly")
+
+                    # Clean the text
+                    if document_text:
+                        document_text = clean_document_text(document_text, file_path)
+            except Exception as e:
+                print(f"Error reading file directly: {e}")
+                document_text = None
+
+        # If still no text, try to get from summary and analysis
+        if not document_text or len(document_text) < 200:
+            if "text" in summary:
+                print("Using summary text as document content")
+                document_text = summary["text"]
+            else:
+                return "Could not extract document text for risk assessment."
+    except Exception as e:
+        print(f"Error extracting document text: {e}")
+        return f"Error extracting document text: {e}"
+
+    # Create specialized prompt for farmout agreements
+    if is_farmout:
+        # Enhanced prompt with expert farmout agreement knowledge
+        prompt = """
+You are a legal expert specializing in oil and gas farmout agreements. Perform a thorough risk assessment of the following farmout agreement.
+
+A farmout agreement is a contract where one company (farmor) assigns all or part of its working interest in an oil and gas lease to another company (farmee) in exchange for the farmee fulfilling certain obligations like drilling wells. 
+
+For each identified risk, provide the following in a clearly structured format:
+- Risk: [Clear name of the risk]
+- Severity: [High, Medium, or Low]
+- Likelihood: [High, Medium, or Low]
+- Explanation: [Brief explanation]
+
+Focus on these key risk categories common in farmout agreements:
+1. Drilling Obligation Risks - Failure to meet drilling commitments, deadlines, etc.
+2. Earning Provision Risks - Issues with interest assignments, payout conditions
+3. Working Interest Risks - Disputes over interest percentages, before/after payout
+4. Assignment/Transfer Risks - Issues with title, consent requirements
+5. Operatorship Risks - Control disputes, operating cost disagreements
+6. Default/Termination Risks - Conditions for termination, consequences
+
+Example of properly formatted output:
+Risk: Failure to Meet Drilling Deadline
+Severity: High
+Likelihood: Medium
+Explanation: Section 3 requires the farmee to drill 9 wells by Dec 31, but the timeline appears tight given current market conditions.
+
+Document text:
+"""
+    else:
+        # Standard prompt for other legal documents
+        prompt = """
+Perform a detailed legal risk assessment of the following document.
+
+For each identified risk, provide the following in a clearly structured format:
+- Risk: [Clear name of the risk]
+- Severity: [High, Medium, or Low]
+- Likelihood: [High, Medium, or Low]
+- Explanation: [Brief explanation]
+
+Focus on these risk categories:
+1. Contractual Risks
+2. Regulatory Risks
+3. Litigation Risks
+4. Intellectual Property Risks
+
+Document text:
+"""
+
+    # Append document text, limiting length to avoid token issues
+    prompt += document_text[:7000] if is_farmout else document_text[:5000]
+
+    try:
+        # Create agent and task directly
+        if "legal_risk_assessor" not in document_processor.agents:
+            document_processor.agents["legal_risk_assessor"] = document_processor._create_agent("legal_risk_assessor")
+
+        risk_task = Task(
+            description=prompt,
+            expected_output="Structured legal risk assessment with severity and likelihood ratings",
+            agent=document_processor.agents["legal_risk_assessor"]
+        )
+
+        # Create crew for risk assessment
+        crew = Crew(
+            agents=[document_processor.agents["legal_risk_assessor"]],
+            tasks=[risk_task],
+            verbose=True,
+            process=Process.sequential
+        )
+
+        # Execute the crew
+        result = crew.kickoff()
+        risk_assessment = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
+
+        # Check if we got a proper risk assessment
+        if "Risk:" not in risk_assessment and "risk" not in risk_assessment.lower():
+            print("Warning: Risk assessment doesn't contain expected format. Attempting to structure the output.")
+
+            # Check for error message indicating no information
+            if "no information" in risk_assessment.lower() or "insufficient" in risk_assessment.lower():
+                return """
+Risk: Insufficient Information for Risk Assessment
+Severity: Medium
+Likelihood: Medium
+Explanation: The document doesn't provide enough information for a comprehensive risk assessment. This may be due to extraction limitations or the nature of the document itself. Manual review is recommended.
+"""
+
+            # Try to structure the result by adding risk headings
+            sections = re.split(r'\n\s*\n', risk_assessment)
+            structured_output = ""
+
+            for i, section in enumerate(sections):
+                if not section.strip():
+                    continue
+
+                # If this looks like a risk but doesn't have the "Risk:" prefix
+                if section.strip() and "risk" not in section.lower()[:20]:
+                    # Add a risk header
+                    risk_name = f"Risk {i + 1}: {section.split('.', 1)[0].strip()}" if '.' in section else f"Risk {i + 1}"
+                    structured_output += f"\n{risk_name}\n"
+
+                    # Check if section contains severity and likelihood information
+                    if "high" in section.lower() or "medium" in section.lower() or "low" in section.lower():
+                        # Try to determine severity and likelihood
+                        if "severity" not in section.lower():
+                            structured_output += "Severity: Medium\n"
+
+                        if "likelihood" not in section.lower():
+                            structured_output += "Likelihood: Medium\n"
+                    else:
+                        # Add default values
+                        structured_output += "Severity: Medium\n"
+                        structured_output += "Likelihood: Medium\n"
+
+                    # Add the explanation
+                    structured_output += f"Explanation: {section.strip()}\n\n"
+                else:
+                    structured_output += section + "\n\n"
+
+            # If we could structure it, use that
+            if "Risk" in structured_output:
+                risk_assessment = structured_output
+
+        return risk_assessment
+    except Exception as e:
+        error_msg = f"Error assessing legal risks: {str(e)}"
+        print(error_msg)
+        import traceback
+        print(traceback.format_exc())
+        return error_msg
+
+
+def parse_risk_assessment(risk_text):
+    """Parse risk assessment text into structured data for visualization with robust error handling."""
+    risks = []
+
+    # Convert CrewOutput to string if needed
+    if hasattr(risk_text, '__str__'):
+        risk_text = str(risk_text)
+
+    # Handle different formats
+    if not isinstance(risk_text, str):
+        print(f"Warning: risk_text is not a string but a {type(risk_text)}")
+        return []
+
+    # Check for error messages or no risks found
+    if "no risks" in risk_text.lower() or "could not identify" in risk_text.lower() or "no information" in risk_text.lower() or "insufficient" in risk_text.lower():
+        # Create a default "No risks identified" entry
+        risks.append({
+            "name": "No Specific Risks Identified",
+            "severity": "Low",
+            "likelihood": "Low"
+        })
+        return risks
+
+    # Now we can safely process the string
+    sections = re.split(r'\n\s*\n', risk_text)
+
+    for section in sections:
+        lines = section.strip().split('\n')
+        current_risk = None
+
+        for line in lines:
+            line = line.strip()
+
+            # Skip empty lines
+            if not line:
+                continue
+
+            # Look for risk name line
+            if line.startswith('Risk:') or line.startswith('- Risk:') or re.match(r'^\d+\.\s*Risk:', line) or re.match(
+                    r'^Risk \d+:', line):
+                # Save previous risk if it exists and has required fields
+                if current_risk and 'name' in current_risk and 'severity' in current_risk and 'likelihood' in current_risk:
+                    risks.append(current_risk)
+
+                # Extract risk name
+                risk_name = line.split(':', 1)[1].strip() if ':' in line else line
+                current_risk = {'name': risk_name}
+
+            # Look for severity
+            elif line.startswith('Severity:') and current_risk:
+                severity = line.split(':', 1)[1].strip() if ':' in line else line
+                # Standardize severity value
+                if 'high' in severity.lower():
+                    current_risk['severity'] = 'High'
+                elif 'medium' in severity.lower() or 'moderate' in severity.lower() or 'med' in severity.lower():
+                    current_risk['severity'] = 'Medium'
+                else:
+                    current_risk['severity'] = 'Low'
+
+            # Look for likelihood
+            elif line.startswith('Likelihood:') and current_risk:
+                likelihood = line.split(':', 1)[1].strip() if ':' in line else line
+                # Standardize likelihood value
+                if 'high' in likelihood.lower():
+                    current_risk['likelihood'] = 'High'
+                elif 'medium' in likelihood.lower() or 'moderate' in likelihood.lower() or 'med' in likelihood.lower():
+                    current_risk['likelihood'] = 'Medium'
+                else:
+                    current_risk['likelihood'] = 'Low'
+
+        # Add the last risk from this section if it exists
+        if current_risk and 'name' in current_risk and 'severity' in current_risk and 'likelihood' in current_risk:
+            risks.append(current_risk)
+
+    # If we couldn't extract any risks using the section-based approach, try line-by-line
+    if not risks:
+        lines = risk_text.split('\n')
+        current_risk = None
+
+        for line in lines:
+            line = line.strip()
+
+            # Look for risk name line (various formats)
+            if ('risk:' in line.lower() or re.match(r'^\d+\.\s+[^:]+$', line)) and not line.lower().startswith(
+                    'explanation:'):
+                # Save previous risk if it exists and has required fields
+                if current_risk and 'name' in current_risk and 'severity' in current_risk and 'likelihood' in current_risk:
+                    risks.append(current_risk)
+
+                # Extract risk name
+                if ':' in line:
+                    risk_name = line.split(':', 1)[1].strip()
+                else:
+                    # For numbered items without a colon
+                    risk_name = re.sub(r'^\d+\.\s+', '', line).strip()
+
+                current_risk = {'name': risk_name}
+
+            # Look for severity indicators
+            elif current_risk and ('severity' in line.lower() or 'impact' in line.lower()):
+                if 'high' in line.lower():
+                    current_risk['severity'] = 'High'
+                elif 'medium' in line.lower() or 'moderate' in line.lower() or 'med' in line.lower():
+                    current_risk['severity'] = 'Medium'
+                else:
+                    current_risk['severity'] = 'Low'
+
+            # Look for likelihood indicators
+            elif current_risk and ('likelihood' in line.lower() or 'probability' in line.lower()):
+                if 'high' in line.lower():
+                    current_risk['likelihood'] = 'High'
+                elif 'medium' in line.lower() or 'moderate' in line.lower() or 'med' in line.lower():
+                    current_risk['likelihood'] = 'Medium'
+                else:
+                    current_risk['likelihood'] = 'Low'
+
+        # Add the last risk if it exists
+        if current_risk and 'name' in current_risk and 'severity' in current_risk and 'likelihood' in current_risk:
+            risks.append(current_risk)
+
+    # If we still don't have any risks, make a last attempt using regex
+    if not risks:
+        # Look for patterns like "Risk: X, Severity: Y, Likelihood: Z"
+        pattern = r'(?:Risk|Issue):\s*([^,\n]+)(?:.*?(?:Severity|Impact):\s*(High|Medium|Low|high|medium|low))?(?:.*?(?:Likelihood|Probability):\s*(High|Medium|Low|high|medium|low))?'
+        matches = re.finditer(pattern, risk_text, re.IGNORECASE | re.DOTALL)
+
+        for match in matches:
+            name = match.group(1).strip() if match.group(1) else "Unnamed Risk"
+            severity = match.group(2).title() if match.group(2) else "Medium"
+            likelihood = match.group(3).title() if match.group(3) else "Medium"
+
+            risks.append({
+                'name': name,
+                'severity': severity,
+                'likelihood': likelihood
+            })
+
+    # Final validation - ensure all risks have proper severity and likelihood
+    for risk in risks:
+        if 'severity' not in risk or risk['severity'] not in ['High', 'Medium', 'Low']:
+            risk['severity'] = 'Medium'
+        if 'likelihood' not in risk or risk['likelihood'] not in ['High', 'Medium', 'Low']:
+            risk['likelihood'] = 'Medium'
+
+    # If we still have no risks, create a default entry
+    if not risks:
+        risks.append({
+            "name": "Analysis Inconclusive",
+            "severity": "Medium",
+            "likelihood": "Medium"
+        })
+
+    return risks
+
+
+def create_risk_matrix(risks):
+    """Create a risk matrix visualization for legal risks with improved farmout agreement support."""
+    # Convert severity and likelihood to numeric values
+    severity_map = {"Low": 1, "Medium": 2, "High": 3}
+    likelihood_map = {"Low": 1, "Medium": 2, "High": 3}
+
+    # Create dataframe
+    risk_df = pd.DataFrame(risks)
+
+    # Handle empty or invalid risk data
+    if risk_df.empty or 'severity' not in risk_df.columns or 'likelihood' not in risk_df.columns:
+        # Create a placeholder risk matrix with a message
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.set_xlim(0.5, 3.5)
+        ax.set_ylim(0.5, 3.5)
+        ax.text(2, 2, "No valid risk data available for visualization", ha='center', va='center', fontsize=14)
+
+        # Still draw the risk matrix grid for context
+        # Low risk (green)
+        ax.add_patch(plt.Rectangle((0.5, 0.5), 1, 1, color='green', alpha=0.3))
+        # Medium risk (yellow)
+        ax.add_patch(plt.Rectangle((0.5, 1.5), 1, 1, color='yellow', alpha=0.3))
+        ax.add_patch(plt.Rectangle((1.5, 0.5), 1, 1, color='yellow', alpha=0.3))
+        ax.add_patch(plt.Rectangle((1.5, 1.5), 1, 1, color='yellow', alpha=0.3))
+        # High risk (red)
+        ax.add_patch(plt.Rectangle((0.5, 2.5), 1, 1, color='red', alpha=0.3))
+        ax.add_patch(plt.Rectangle((1.5, 2.5), 2, 1, color='red', alpha=0.3))
+        ax.add_patch(plt.Rectangle((2.5, 0.5), 1, 3, color='red', alpha=0.3))
+
+        # Set labels
+        ax.set_xlabel('Likelihood')
+        ax.set_ylabel('Severity')
+        ax.set_title('Legal Risk Matrix')
+        ax.set_xticks([1, 2, 3])
+        ax.set_xticklabels(['Low', 'Medium', 'High'])
+        ax.set_yticks([1, 2, 3])
+        ax.set_yticklabels(['Low', 'Medium', 'High'])
+        return fig
+
+    # Map severity and likelihood to numeric values
+    risk_df["severity_val"] = risk_df["severity"].map(severity_map)
+    risk_df["likelihood_val"] = risk_df["likelihood"].map(likelihood_map)
+
+    # Handle missing values
+    risk_df["severity_val"] = risk_df["severity_val"].fillna(2)  # Default to Medium
+    risk_df["likelihood_val"] = risk_df["likelihood_val"].fillna(2)  # Default to Medium
+
+    # Create plot with improved sizing
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Create risk matrix
+    ax.set_xlim(0.5, 3.5)
+    ax.set_ylim(0.5, 3.5)
+
+    # Add grid
+    ax.grid(True, linestyle='--', alpha=0.7)
+
+    # Add risk zones with improved coloring
+    # Low risk (green)
+    ax.add_patch(plt.Rectangle((0.5, 0.5), 1, 1, color='green', alpha=0.3))
+
+    # Medium risk (yellow)
+    ax.add_patch(plt.Rectangle((0.5, 1.5), 1, 1, color='yellow', alpha=0.3))
+    ax.add_patch(plt.Rectangle((1.5, 0.5), 1, 1, color='yellow', alpha=0.3))
+    ax.add_patch(plt.Rectangle((1.5, 1.5), 1, 1, color='yellow', alpha=0.3))
+
+    # High risk (red)
+    ax.add_patch(plt.Rectangle((0.5, 2.5), 1, 1, color='red', alpha=0.3))
+    ax.add_patch(plt.Rectangle((1.5, 2.5), 2, 1, color='red', alpha=0.3))
+    ax.add_patch(plt.Rectangle((2.5, 0.5), 1, 3, color='red', alpha=0.3))
+
+    # Add labels to each risk zone
+    ax.text(1, 1, 'LOW', ha='center', va='center', fontweight='bold')
+    ax.text(1, 2, 'MEDIUM', ha='center', va='center', fontweight='bold')
+    ax.text(2, 1, 'MEDIUM', ha='center', va='center', fontweight='bold')
+    ax.text(2, 2, 'MEDIUM', ha='center', va='center', fontweight='bold')
+    ax.text(1, 3, 'HIGH', ha='center', va='center', fontweight='bold')
+    ax.text(2, 3, 'HIGH', ha='center', va='center', fontweight='bold')
+    ax.text(3, 2, 'HIGH', ha='center', va='center', fontweight='bold')
+    ax.text(3, 1, 'HIGH', ha='center', va='center', fontweight='bold')
+    ax.text(3, 3, 'CRITICAL', ha='center', va='center', fontweight='bold', color='white',
+            bbox=dict(facecolor='red', alpha=0.7))
+
+    # Detect if this is likely a farmout agreement based on risk names
+    is_farmout = any('drill' in str(r).lower() or 'farm' in str(r).lower() or 'payout' in str(r).lower()
+                     for r in risk_df['name'])
+
+    # Plot risks with different markers and colors for farmout agreements
+    if is_farmout:
+        # Define farmout risk categories and their markers/colors
+        farmout_categories = {
+            'drilling': ['drill', 'well', 'exploration', 'obligation'],
+            'earning': ['earn', 'payout', 'interest', 'working interest'],
+            'assignment': ['assign', 'transfer', 'convey', 'title'],
+            'operations': ['operat', 'joint', 'control', 'cost'],
+            'termination': ['terminat', 'default', 'withdraw', 'breach'],
+            'contractual': ['contract', 'agreement', 'provision', 'term', 'clause'],
+            'other': []  # Catch-all
+        }
+
+        markers = {
+            'drilling': 'o',  # Circle
+            'earning': 's',  # Square
+            'assignment': '^',  # Triangle
+            'operations': 'D',  # Diamond
+            'termination': 'P',  # Plus (filled)
+            'contractual': 'X',  # X
+            'other': '*'  # Star
+        }
+
+        colors = {
+            'drilling': 'blue',
+            'earning': 'purple',
+            'assignment': 'orange',
+            'operations': 'green',
+            'termination': 'red',
+            'contractual': 'brown',
+            'other': 'black'
+        }
+
+        # Create a legend handler
+        legend_elements = []
+
+        # Plot each risk with appropriate category
+        for i, risk in risk_df.iterrows():
+            # Determine risk category
+            category = 'other'
+            risk_name = str(risk['name']).lower()
+
+            for cat, keywords in farmout_categories.items():
+                if any(kw in risk_name for kw in keywords):
+                    category = cat
+                    break
+
+            # Add jitter to prevent overlapping points
+            jitter_x = (np.random.random() - 0.5) * 0.1
+            jitter_y = (np.random.random() - 0.5) * 0.1
+
+            # Plot with category-specific marker and color
+            scatter = ax.scatter(
+                risk["likelihood_val"] + jitter_x,
+                risk["severity_val"] + jitter_y,
+                s=150, marker=markers[category], color=colors[category],
+                edgecolors='black', linewidth=1, alpha=0.9, zorder=10
+            )
+
+            # Truncate long risk names
+            display_name = str(risk["name"])
+            if len(display_name) > 20:
+                display_name = display_name[:17] + "..."
+
+            # Check for crowded labels
+            text_x = risk["likelihood_val"] + jitter_x + 0.1
+            text_y = risk["severity_val"] + jitter_y + 0.1
+
+            # Adjust label position based on location in graph
+            if text_x > 3.3:  # Near right edge
+                text_x = risk["likelihood_val"] + jitter_x - 0.1
+                ax.annotate(display_name, (text_x, text_y),
+                            ha='right', fontsize=8, fontweight='bold')
+            else:
+                ax.annotate(display_name, (text_x, text_y),
+                            fontsize=8, fontweight='bold')
+
+            # Add to legend if category not already represented
+            if category not in [elem.get_label() for elem in legend_elements]:
+                legend_elements.append(plt.Line2D([0], [0], marker=markers[category], color='w',
+                                                  markerfacecolor=colors[category], markersize=10,
+                                                  label=category.title()))
+
+        # Add legend with clear title
+        ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 1),
+                  title="Farmout Risk Categories")
+        plt.subplots_adjust(right=0.75)  # Make room for legend
+
+    else:
+        # Standard risk plotting for non-farmout documents
+        # Add jitter to prevent overlapping points
+        risk_df['jitter_x'] = [np.random.uniform(-0.1, 0.1) for _ in range(len(risk_df))]
+        risk_df['jitter_y'] = [np.random.uniform(-0.1, 0.1) for _ in range(len(risk_df))]
+
+        # Plot each risk
+        for i, risk in risk_df.iterrows():
+            # Color points based on risk level (severity * likelihood)
+            risk_level = risk["severity_val"] * risk["likelihood_val"]
+            if risk_level >= 6:  # High (both Medium-High or High-Medium)
+                color = 'red'
+                size = 120
+            elif risk_level >= 3:  # Medium
+                color = 'orange'
+                size = 100
+            else:  # Low
+                color = 'blue'
+                size = 80
+
+            ax.scatter(
+                risk["likelihood_val"] + risk['jitter_x'],
+                risk["severity_val"] + risk['jitter_y'],
+                s=size, color=color, alpha=0.7, edgecolors='black'
+            )
+
+            # Truncate long risk names
+            display_name = str(risk["name"])
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
+
+            # Position label based on location to avoid edge cutoff
+            if risk["likelihood_val"] > 2.5:  # Near right edge
+                ax.annotate(display_name,
+                            (risk["likelihood_val"] + risk['jitter_x'] - 0.1,
+                             risk["severity_val"] + risk['jitter_y'] + 0.1),
+                            ha='right', fontsize=9)
+            else:
+                ax.annotate(display_name,
+                            (risk["likelihood_val"] + risk['jitter_x'] + 0.1,
+                             risk["severity_val"] + risk['jitter_y'] + 0.1),
+                            fontsize=9)
+
+    # Set labels with bold font
+    ax.set_xlabel('Likelihood', fontweight='bold', fontsize=12)
+    ax.set_ylabel('Severity', fontweight='bold', fontsize=12)
+
+    # Set title with farmout indication if applicable
+    title = 'Farmout Agreement Risk Matrix' if is_farmout else 'Legal Risk Matrix'
+    ax.set_title(title, fontweight='bold', fontsize=14)
+
+    # Set ticks
+    ax.set_xticks([1, 2, 3])
+    ax.set_xticklabels(['Low', 'Medium', 'High'], fontsize=10)
+    ax.set_yticks([1, 2, 3])
+    ax.set_yticklabels(['Low', 'Medium', 'High'], fontsize=10)
+
+    # Add a note about risk count
+    risk_count = len(risk_df)
+    if risk_count == 1 and "no specific risks" in str(risk_df['name'].iloc[0]).lower():
+        ax.text(0.5, 0.01, "No specific risks were identified in this document",
+                transform=ax.transAxes, ha='center', fontsize=10,
+                bbox=dict(facecolor='yellow', alpha=0.2))
+    else:
+        ax.text(0.5, 0.01, f'Total risks identified: {risk_count}',
+                transform=ax.transAxes, ha='center', fontsize=10, fontweight='bold')
+
+    return fig
 
 
 def advanced_search_documents(query_text, max_results=5, search_chunks=True):
@@ -746,14 +1420,12 @@ def advanced_search_documents(query_text, max_results=5, search_chunks=True):
                 "id": doc_id,
                 "doc_id": metadata.get("doc_id", "unknown"),
                 "filename": metadata.get("filename", metadata.get("source", "unknown")),
-                "chunk": metadata.get("chunk", "N/A") if search_chunks else "summary",
+                "chunk" if search_chunks else "summary": metadata.get("chunk", "N/A") if search_chunks else "summary",
                 "text": result_text,
                 "similarity_score": similarity_score
             })
 
     return formatted_results
-
-
 def get_all_documents():
     """Get all legal documents in the database."""
     chroma_storage = ChromaDBStorage(
@@ -889,105 +1561,6 @@ Date: ___________________
         import traceback
         add_status_message(traceback.format_exc(), "error")
         return False
-
-
-def create_risk_matrix(risks):
-    """Create a risk matrix visualization for legal risks."""
-    # Convert severity and likelihood to numeric values
-    severity_map = {"Low": 1, "Medium": 2, "High": 3}
-    likelihood_map = {"Low": 1, "Medium": 2, "High": 3}
-
-    # Create dataframe
-    risk_df = pd.DataFrame(risks)
-    risk_df["severity_val"] = risk_df["severity"].map(severity_map)
-    risk_df["likelihood_val"] = risk_df["likelihood"].map(likelihood_map)
-
-    # Create plot
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    # Create risk matrix
-    ax.set_xlim(0.5, 3.5)
-    ax.set_ylim(0.5, 3.5)
-
-    # Add grid
-    ax.grid(True, linestyle='--', alpha=0.7)
-
-    # Add risk zones
-    # Low risk (green)
-    ax.add_patch(plt.Rectangle((0.5, 0.5), 1, 1, color='green', alpha=0.3))
-    # Medium risk (yellow)
-    ax.add_patch(plt.Rectangle((0.5, 1.5), 1, 1, color='yellow', alpha=0.3))
-    ax.add_patch(plt.Rectangle((1.5, 0.5), 1, 1, color='yellow', alpha=0.3))
-    ax.add_patch(plt.Rectangle((1.5, 1.5), 1, 1, color='yellow', alpha=0.3))
-    # High risk (red)
-    ax.add_patch(plt.Rectangle((0.5, 2.5), 1, 1, color='red', alpha=0.3))
-    ax.add_patch(plt.Rectangle((1.5, 2.5), 2, 1, color='red', alpha=0.3))
-    ax.add_patch(plt.Rectangle((2.5, 0.5), 1, 3, color='red', alpha=0.3))
-
-    # Plot risks
-    for i, risk in risk_df.iterrows():
-        ax.scatter(risk["likelihood_val"], risk["severity_val"], s=100, color='blue')
-        ax.annotate(risk["name"], (risk["likelihood_val"], risk["severity_val"]),
-                    xytext=(5, 5), textcoords='offset points')
-
-    # Set labels
-    ax.set_xlabel('Likelihood')
-    ax.set_ylabel('Severity')
-    ax.set_title('Legal Risk Matrix')
-
-    # Set ticks
-    ax.set_xticks([1, 2, 3])
-    ax.set_xticklabels(['Low', 'Medium', 'High'])
-    ax.set_yticks([1, 2, 3])
-    ax.set_yticklabels(['Low', 'Medium', 'High'])
-
-    return fig
-
-
-def parse_risk_assessment(risk_text):
-    """Parse risk assessment text into structured data for visualization."""
-    risks = []
-
-    # Convert CrewOutput to string if needed
-    if hasattr(risk_text, '__str__'):
-        risk_text = str(risk_text)
-
-    # Handle different formats
-    if not isinstance(risk_text, str):
-        print(f"Warning: risk_text is not a string but a {type(risk_text)}")
-        return []
-
-    # Now we can safely split the string
-    lines = risk_text.split('\n')
-
-    current_risk = None
-    for line in lines:
-        line = line.strip()
-        if line.startswith('Risk:') or line.startswith('- Risk:'):
-            # New risk found
-            if current_risk and 'name' in current_risk and 'severity' in current_risk and 'likelihood' in current_risk:
-                risks.append(current_risk)
-            current_risk = {'name': line.split(':', 1)[1].strip()}
-        elif line.startswith('Severity:') and current_risk:
-            severity = line.split(':', 1)[1].strip()
-            if any(level in severity for level in ['High', 'Medium', 'Low']):
-                for level in ['High', 'Medium', 'Low']:
-                    if level in severity:
-                        current_risk['severity'] = level
-                        break
-        elif line.startswith('Likelihood:') and current_risk:
-            likelihood = line.split(':', 1)[1].strip()
-            if any(level in likelihood for level in ['High', 'Medium', 'Low']):
-                for level in ['High', 'Medium', 'Low']:
-                    if level in likelihood:
-                        current_risk['likelihood'] = level
-                        break
-
-    # Add the last risk if it exists
-    if current_risk and 'name' in current_risk and 'severity' in current_risk and 'likelihood' in current_risk:
-        risks.append(current_risk)
-
-    return risks
 
 
 def display_legal_definitions(definitions_text):

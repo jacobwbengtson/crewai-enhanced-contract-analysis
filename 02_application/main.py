@@ -449,36 +449,39 @@ class CrewAIDocumentProcessor:
             raise ValueError(f"Unsupported file format: {file_extension}")
 
     def _extract_from_pdf(self, file_path: str) -> str:
-        """Extract text from PDF files with improved reliability."""
+        """Extract text from PDF files with improved reliability for legal documents."""
         print(f"Extracting text from PDF: {file_path}")
 
         # Try multiple extraction methods until we get usable text
         text = ""
 
-        # Method 1: PyPDF2
+        # Method 1: PyPDF2 with enhanced handling for legal documents
         try:
             with open(file_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
                 text = ""
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
+
+                # Process each page individually to mitigate failures
+                for page_num, page in enumerate(reader.pages):
+                    try:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n\n"  # Double newline for paragraph separation
+                    except Exception as e:
+                        print(f"Warning: Error extracting page {page_num}: {e}")
+                        # Continue with next page if one fails
 
                 print(f"PyPDF2 extracted {len(text)} characters from PDF")
 
-                # If we got a reasonable amount of text, return it
+                # If we got a reasonable amount of text, clean and return it
                 if len(text) > 100:
+                    text = self._clean_pdf_artifacts(text, file_path)
                     return text
         except Exception as e:
             print(f"Error extracting text with PyPDF2: {e}")
 
-        # If PyPDF2 didn't work well, try another method or external tool
-        # For example, you could call an external tool like pdftotext (from poppler-utils)
-        # or a Python library like pdf2text if available
-
+        # If PyPDF2 didn't work well, try another method using pdftotext if available
         try:
-            # Check if pdftotext is available (from poppler-utils)
             import subprocess
             import tempfile
 
@@ -486,27 +489,47 @@ class CrewAIDocumentProcessor:
             with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as temp_file:
                 temp_output = temp_file.name
 
-            # Call pdftotext
+            # Try with layout preservation first
             try:
                 subprocess.run(['pdftotext', '-layout', file_path, temp_output],
-                               check=True, capture_output=True)
+                               check=True, capture_output=True, timeout=60)
 
                 # Read the output
                 with open(temp_output, 'r', encoding='utf-8', errors='ignore') as f:
                     text = f.read()
 
-                print(f"pdftotext extracted {len(text)} characters from PDF")
+                print(f"pdftotext with layout extracted {len(text)} characters from PDF")
+
+                # If not enough text, try without layout
+                if len(text) < 100:
+                    subprocess.run(['pdftotext', file_path, temp_output],
+                                   check=True, capture_output=True, timeout=30)
+
+                    with open(temp_output, 'r', encoding='utf-8', errors='ignore') as f:
+                        text = f.read()
+
+                    print(f"pdftotext without layout extracted {len(text)} characters from PDF")
 
                 # Clean up
                 os.unlink(temp_output)
 
-                # If we got a reasonable amount of text, return it
+                # If we got a reasonable amount of text, clean and return it
                 if len(text) > 100:
+                    text = self._clean_pdf_artifacts(text, file_path)
                     return text
             except subprocess.CalledProcessError:
-                print("pdftotext command failed or is not installed")
+                print("pdftotext command failed")
             except FileNotFoundError:
                 print("pdftotext command not found")
+            except Exception as e:
+                print(f"pdftotext error: {e}")
+            finally:
+                # Ensure temp file is removed
+                if os.path.exists(temp_output):
+                    try:
+                        os.unlink(temp_output)
+                    except:
+                        pass
         except Exception as e:
             print(f"Error using alternative PDF extraction: {e}")
 
@@ -514,18 +537,37 @@ class CrewAIDocumentProcessor:
         try:
             with open(file_path, 'rb') as file:
                 binary_data = file.read()
+                best_text = ""
+                best_score = 0
 
                 # Try different encodings
-                for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                for encoding in ['utf-8', 'latin-1', 'cp1252', 'utf-16', 'ascii']:
                     try:
                         text = binary_data.decode(encoding, errors='ignore')
-                        print(f"Raw binary with {encoding} extracted {len(text)} characters")
 
-                        # If we got text that looks reasonable, return it
-                        if len(text) > 100:
-                            return text
+                        # For legal documents, look for common legal terms
+                        legal_term_count = sum(1 for term in [
+                            'agreement', 'hereby', 'shall', 'party', 'contract',
+                            'obligations', 'pursuant', 'herein', 'witness', 'whereas'
+                        ] if term.lower() in text.lower())
+
+                        # Consider both length and presence of legal terms
+                        quality_score = len(text) * (1 + (legal_term_count * 0.1))
+
+                        print(f"Raw binary with {encoding} extracted {len(text)} characters (score: {quality_score})")
+
+                        if quality_score > best_score:
+                            best_text = text
+                            best_score = quality_score
                     except Exception:
                         pass
+
+                if best_score > 0:
+                    text = best_text
+                    # If we got text that looks reasonable, clean and return it
+                    if len(text) > 100:
+                        text = self._clean_pdf_artifacts(text, file_path)
+                        return text
         except Exception as e:
             print(f"Error with raw binary reading: {e}")
 
@@ -534,6 +576,8 @@ class CrewAIDocumentProcessor:
         if not text:
             text = f"Failed to extract text from PDF: {file_path}"
             print(text)
+        else:
+            text = self._clean_pdf_artifacts(text, file_path)
 
         return text
 
@@ -588,7 +632,7 @@ class CrewAIDocumentProcessor:
         print(f"Text preview: {text[:200]}...")
 
         # Clean the text of potential PDF artifacts
-        text = self._clean_pdf_artifacts(text)
+        text = self._clean_pdf_artifacts(text, file_path)
         print(f"After cleaning, text length: {len(text)} characters")
 
         # Split text into chunks
@@ -642,8 +686,11 @@ class CrewAIDocumentProcessor:
             "crew_result": crew_result
         }
 
-    def _clean_pdf_artifacts(self, text: str) -> str:
-        """Clean PDF artifacts from extracted text."""
+    def _clean_pdf_artifacts(self, text: str, file_path: str = None) -> str:
+        """
+        Clean PDF artifacts from extracted text.
+        Specifically enhanced for legal documents like farmout agreements.
+        """
         # Remove PDF object references
         text = re.sub(r'\d+ \d+ obj.*?endobj', ' ', text, flags=re.DOTALL)
 
@@ -665,8 +712,30 @@ class CrewAIDocumentProcessor:
         # Remove common PDF artifacts
         text = re.sub(r'EvoPdf_[a-zA-Z0-9_]+', '', text)
 
-        # Replace multiple whitespace with single space
+        # Remove URLs that appear in farmout PDFs (common in SEC documents)
+        text = re.sub(r'https?://www\.sec\.gov/[^\s]+', '', text)
+
+        # Remove timestamp headers that may appear in SEC documents
+        text = re.sub(r'\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s+[AP]M', '', text)
+
+        # Remove page numbers in common formats
+        text = re.sub(r'\n\s*\d+\s*/\s*\d+\s*\n', '\n', text)
+        text = re.sub(r'\n\s*Page\s+\d+\s+of\s+\d+\s*\n', '\n', text)
+
+        # Fix paragraph breaks (especially for farmout agreements)
+        text = re.sub(r'([a-z])\n([a-z])', r'\1 \2', text)  # Join broken sentences
+
+        # Normalize whitespace
         text = re.sub(r'\s+', ' ', text)
+
+        # Restore paragraph breaks for numbered sections (common in farmout agreements)
+        text = re.sub(r'(\d+\.\s+)', r'\n\n\1', text)
+
+        # Restore paragraph breaks for WHEREAS clauses
+        text = re.sub(r'(WHEREAS)', r'\n\n\1', text)
+
+        # Normalize whitespace again and trim
+        text = re.sub(r'\s+', ' ', text).strip()
 
         return text
 
@@ -936,29 +1005,87 @@ class CrewAIDocumentProcessor:
         return self.extract_legal_definitions(text)
 
     def assess_legal_risks(self, text: str, risk_categories: List[str] = None) -> str:
-        """Assess legal risks in a document."""
+        """Assess legal risks in a document with enhanced support for farmout agreements."""
         print(f"Assessing legal risks, text length: {len(text)} characters")
 
-        if not risk_categories:
-            risk_categories = ["contractual", "regulatory", "litigation", "intellectual property"]
+        # Check if this might be a farmout agreement
+        is_farmout = any(term in text.lower() for term in
+                         ['farmout', 'farm-out', 'farm out', 'farmor', 'farmee', 'working interest', 'payout'])
 
-        # Limit text to avoid token limits
-        truncated_text = text[:5000] if len(text) > 5000 else text
+        if not risk_categories:
+            if is_farmout:
+                # Use farmout-specific risk categories
+                risk_categories = [
+                    "drilling obligations", "earning provisions", "working interest",
+                    "assignment", "operatorship", "termination"
+                ]
+            else:
+                # Default categories for other legal documents
+                risk_categories = ["contractual", "regulatory", "litigation", "intellectual property"]
+
+        # Limit text to avoid token limits - use a larger limit for farmout agreements
+        max_chars = 7500 if is_farmout else 5000
+        truncated_text = text[:max_chars] if len(text) > max_chars else text
 
         try:
-            # Create description directly
-            description = "Assess the legal risks in the following document text, categorizing them by "
-            description += ", ".join(risk_categories) + ". "
-            description += "Provide a risk rating (High/Medium/Low) and potential mitigation strategies for each risk. "
-            description += f"Document text: {truncated_text}"
+            # Create a more detailed prompt for farmout agreements
+            if is_farmout:
+                prompt = """
+                You are a legal expert specializing in oil and gas farmout agreements. Perform a thorough risk assessment of the following farmout agreement.
+
+                A farmout agreement is a contract where one company (farmor) assigns all or part of its working interest in an oil and gas lease to another company (farmee) in exchange for the farmee fulfilling certain obligations like drilling wells. 
+
+                For each identified risk, provide the following in a clearly structured format:
+                - Risk: [Clear name of the risk]
+                - Severity: [High, Medium, or Low]
+                - Likelihood: [High, Medium, or Low]
+                - Explanation: [Brief explanation]
+
+                Focus on these key risk categories:
+                1. Drilling Obligation Risks - Failure to meet drilling commitments, deadlines, etc.
+                2. Earning Provision Risks - Issues with interest assignments, payout conditions
+                3. Working Interest Risks - Disputes over interest percentages, before/after payout
+                4. Assignment/Transfer Risks - Issues with title, consent requirements
+                5. Operatorship Risks - Control disputes, operating cost disagreements
+                6. Default/Termination Risks - Conditions for termination, consequences
+
+                Example of properly formatted output:
+                Risk: Failure to Meet Drilling Deadline
+                Severity: High
+                Likelihood: Medium
+                Explanation: Section 3 requires the farmee to drill 9 wells by Dec 31, but the timeline appears tight given current market conditions.
+
+                Document text:
+                """
+            else:
+                # Standard prompt for other legal documents
+                prompt = """
+                Perform a detailed legal risk assessment of the following document.
+
+                For each identified risk, provide the following in a clearly structured format:
+                - Risk: [Clear name of the risk]
+                - Severity: [High, Medium, or Low]
+                - Likelihood: [High, Medium, or Low]
+                - Explanation: [Brief explanation]
+
+                Focus on these risk categories:
+                """
+                # Add risk categories
+                for i, category in enumerate(risk_categories):
+                    prompt += f"{i + 1}. {category.title()} Risks\n"
+
+                prompt += "\nDocument text:\n"
+
+            # Append document text
+            prompt += truncated_text
 
             # Create agent and task directly
             if "legal_risk_assessor" not in self.agents:
                 self.agents["legal_risk_assessor"] = self._create_agent("legal_risk_assessor")
 
             risk_task = Task(
-                description=description,
-                expected_output="Legal risk assessment report with risk ratings and mitigation recommendations",
+                description=prompt,
+                expected_output="Structured legal risk assessment with severity and likelihood ratings",
                 agent=self.agents["legal_risk_assessor"]
             )
 
@@ -973,16 +1100,76 @@ class CrewAIDocumentProcessor:
             # Execute the crew
             result = crew.kickoff()
 
-            # Convert CrewOutput to string
+            # Convert CrewOutput to string if needed
             risk_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
+
+            # Check if the response has proper formatting
+            if "Risk:" not in risk_text and ("no risks" not in risk_text.lower() and
+                                             "insufficient" not in risk_text.lower() and
+                                             "could not identify" not in risk_text.lower()):
+                print("Warning: Risk assessment missing proper format. Attempting to structure it.")
+
+                # Try to add proper formatting
+                lines = risk_text.split('\n')
+                structured_text = ""
+
+                # Look for paragraph breaks or numbered sections
+                sections = []
+                current_section = []
+
+                for line in lines:
+                    # If this looks like the start of a new risk (numbered or blank line before)
+                    if re.match(r'^\d+\.', line) or (not current_section and line.strip()):
+                        if current_section:
+                            sections.append('\n'.join(current_section))
+                            current_section = []
+                        current_section.append(line)
+                    elif not line.strip() and current_section:
+                        sections.append('\n'.join(current_section))
+                        current_section = []
+                    else:
+                        current_section.append(line)
+
+                # Add the last section
+                if current_section:
+                    sections.append('\n'.join(current_section))
+
+                # Structure each section
+                for i, section in enumerate(sections):
+                    if not section.strip():
+                        continue
+
+                    # Add a risk heading if missing
+                    if not section.lower().startswith('risk:'):
+                        # Try to extract a name from the first line
+                        first_line = section.split('\n')[0].strip()
+                        if first_line:
+                            structured_text += f"Risk: {first_line}\n"
+                        else:
+                            structured_text += f"Risk {i + 1}: Undefined Risk\n"
+
+                        # Add default severity and likelihood if not found
+                        if 'severity' not in section.lower():
+                            structured_text += "Severity: Medium\n"
+                        if 'likelihood' not in section.lower():
+                            structured_text += "Likelihood: Medium\n"
+
+                        # Add the rest as explanation
+                        structured_text += f"Explanation: {section}\n\n"
+                    else:
+                        structured_text += section + "\n\n"
+
+                # If we managed to structure it, use that instead
+                if "Risk:" in structured_text:
+                    risk_text = structured_text
 
             return risk_text
         except Exception as e:
-            print(f"Error in assess_legal_risks method: {e}")
+            error_msg = f"Error assessing legal risks: {str(e)}"
+            print(error_msg)
             import traceback
             traceback.print_exc()
-            # Fallback if CrewAI fails
-            return f"Error assessing legal risks: {str(e)}"
+            return error_msg
 
     def check_legal_compliance(self, text: str, regulatory_areas: List[str] = None) -> str:
         """Check document for compliance with regulations."""
