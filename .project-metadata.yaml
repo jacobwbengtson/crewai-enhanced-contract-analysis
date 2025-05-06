@@ -11,7 +11,14 @@ environment_variables:
     OPENAI_API_KEY:
       default: ""
       description: "OPENAI API Key for LLM Calls"
-
+    LLM_MODEL_ID:
+      default: "llm_model_id"
+      description: >-
+        Get the LLM_MODEL_ID from Cloduera AI, Model Endpoints, model of interest, Model Endpoint Details
+    LLM_MODEL_ENDPOINT:
+      default: "llm_model_endpoint"
+      description: >-
+        Get the LLM_MODEL_ENDPOINT from Cloudera AI, Model Endpoints, model of interest, URL under the model name
 
 runtimes:
   - editor: Jupyterlab
