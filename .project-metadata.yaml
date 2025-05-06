@@ -21,8 +21,8 @@ environment_variables:
         Get the LLM_MODEL_ENDPOINT from Cloudera AI, Model Endpoints, model of interest, URL under the model name
 
 runtimes:
-  - editor: Jupyterlab
-    kernel: Python 3.12
+  - editor: PBJ Workbench
+    kernel: Python 3.10
     edition: Standard
 
 tasks:
