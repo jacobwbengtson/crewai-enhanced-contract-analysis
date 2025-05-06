@@ -50,11 +50,19 @@ import docx
 import PyPDF2
 from crewai import Agent, Task, Crew, Process
 from langchain_openai import ChatOpenAI
-
+from crew_tools import (
+    ChromaDBStorage, get_storage, add_texts, add_summary,
+    search_chunks, search_summaries, get_all_summaries, get_summary,
+    ChromaDBRetrievalTool, analyze_text  # Fixed: Added analyze_text import
+)
 # Add these imports for the SentenceTransformer fix
 import os
 import sys
 import logging
+
+# Define fixed paths for YAML files - HARDCODED FOR RELIABILITY
+AGENTS_YAML_PATH = "/home/cdsw/02_application/agents.yaml"
+TASKS_YAML_PATH = "/home/cdsw/02_application/tasks.yaml"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -106,80 +114,69 @@ class ChromaDBStorage:
         print(f"ChromaDB directory exists: {os.path.exists(db_path)}")
 
         # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(path=db_path)
-        print("ChromaDB client initialized")
-
-        # Create embedding function - USING ONLY LOCAL MODELS
         try:
-            # First try to use SentenceTransformer with custom cache path
-            logger.info("Attempting to initialize SentenceTransformerEmbeddingFunction")
+            print("Initializing ChromaDB client")
+            self.client = chromadb.PersistentClient(path=db_path)
+            print("ChromaDB client initialized")
+        except Exception as e:
+            print(f"Error initializing ChromaDB client: {e}")
+            raise
+
+        # Create embedding function - THIS MUST COME BEFORE CREATING COLLECTIONS
+        try:
+            from chromadb.utils import embedding_functions
+            print("Creating embedding function")
             self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
                 model_name="all-MiniLM-L6-v2"
             )
-            logger.info("Successfully created embedding function using SentenceTransformers")
             print("Embedding function created (using SentenceTransformers)")
         except Exception as e:
-            logger.warning(f"Failed to load SentenceTransformer: {e}")
             print(f"Warning: Failed to load SentenceTransformer: {e}")
-
-            # Try to install sentence-transformers if not already installed
-            try:
-                logger.info("Attempting to install sentence-transformers package")
-                import subprocess
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", "sentence-transformers", "--no-cache-dir"])
-                logger.info("Successfully installed sentence-transformers package")
-
-                # Try again with the newly installed package
-                try:
-                    from sentence_transformers import SentenceTransformer
-                    logger.info("Attempting to initialize SentenceTransformer after installation")
-                    self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-                        model_name="all-MiniLM-L6-v2"
-                    )
-                    logger.info("Successfully created embedding function after installation")
-                    print("Embedding function created (using SentenceTransformers after installation)")
-                except Exception as e2:
-                    logger.warning(f"Still failed to load SentenceTransformer after installation: {e2}")
-                    print(f"Still failed after installation: {e2}")
-                    print("Falling back to DefaultEmbeddingFunction")
-                    self.ef = embedding_functions.DefaultEmbeddingFunction()
-            except Exception as install_error:
-                logger.warning(f"Failed to install sentence-transformers: {install_error}")
-                print(f"Failed to install sentence-transformers: {install_error}")
-                print("Falling back to DefaultEmbeddingFunction")
-                # Fallback to default embedding function if SentenceTransformer fails
-                self.ef = embedding_functions.DefaultEmbeddingFunction()
+            print("Falling back to DefaultEmbeddingFunction")
+            # Fallback to default embedding function if SentenceTransformer fails
+            from chromadb.utils import embedding_functions  # Fixed this line
+            self.ef = embedding_functions.DefaultEmbeddingFunction()
+            print("Default embedding function created")
 
         # Get or create chunks collection
         try:
-            self.chunks_collection = self.client.get_collection(
-                name=chunks_collection,
-                embedding_function=self.ef
-            )
-            print(f"Retrieved existing chunks collection: {chunks_collection}")
-        except:
-            print(f"Chunks collection not found, creating: {chunks_collection}")
-            self.chunks_collection = self.client.create_collection(
-                name=chunks_collection,
-                embedding_function=self.ef
-            )
-            print(f"Created new chunks collection: {chunks_collection}")
+            print(f"Getting chunks collection: {chunks_collection}")
+            try:
+                self.chunks_collection = self.client.get_collection(
+                    name=chunks_collection,
+                    embedding_function=self.ef
+                )
+                print(f"Retrieved existing chunks collection: {chunks_collection}")
+            except Exception as collection_get_error:
+                print(f"Collection not found, creating: {chunks_collection}")
+                self.chunks_collection = self.client.create_collection(
+                    name=chunks_collection,
+                    embedding_function=self.ef
+                )
+                print(f"Created new chunks collection: {chunks_collection}")
+        except Exception as e:
+            print(f"Error with chunks collection: {e}")
+            raise
 
         # Get or create summaries collection
         try:
-            self.summaries_collection = self.client.get_collection(
-                name=summaries_collection,
-                embedding_function=self.ef
-            )
-            print(f"Retrieved existing summaries collection: {summaries_collection}")
-        except:
-            print(f"Summaries collection not found, creating: {summaries_collection}")
-            self.summaries_collection = self.client.create_collection(
-                name=summaries_collection,
-                embedding_function=self.ef
-            )
-            print(f"Created new summaries collection: {summaries_collection}")
+            print(f"Getting summaries collection: {summaries_collection}")
+            try:
+                self.summaries_collection = self.client.get_collection(
+                    name=summaries_collection,
+                    embedding_function=self.ef
+                )
+                print(f"Retrieved existing summaries collection: {summaries_collection}")
+            except Exception as collection_get_error:
+                print(f"Collection not found, creating: {summaries_collection}")
+                self.summaries_collection = self.client.create_collection(
+                    name=summaries_collection,
+                    embedding_function=self.ef
+                )
+                print(f"Created new summaries collection: {summaries_collection}")
+        except Exception as e:
+            print(f"Error with summaries collection: {e}")
+            raise
 
     def add_texts(self, texts: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
         """Add texts to the chunks collection."""
@@ -296,19 +293,28 @@ class CrewAIDocumentProcessor:
     def __init__(self,
                  api_key: str = None,
                  base_url: str = "https://api.openai.com/v1",
-                 model: str = "gpt-4o",
-                 agents_yaml_path: str = "/home/cdsw/02_application/agents.yaml",
-                 tasks_yaml_path: str = "/home/cdsw/02_application/tasks.yaml"):
-        """Initialize CrewAI document processor."""
+                 model: str = "gpt-4o"):
+        """Initialize CrewAI document processor with hardcoded YAML paths."""
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = base_url
         self.model = model
-        self.agents_yaml_path = agents_yaml_path
-        self.tasks_yaml_path = tasks_yaml_path
+
+        # Use hardcoded paths for YAML files
+        self.agents_yaml_path = AGENTS_YAML_PATH
+        self.tasks_yaml_path = TASKS_YAML_PATH
+
+        print(f"Using agents YAML path: {self.agents_yaml_path}")
+        print(f"Using tasks YAML path: {self.tasks_yaml_path}")
+
+        # Check and verify YAML files exist
+        if not os.path.exists(self.agents_yaml_path):
+            print(f"WARNING: Agents YAML file not found at {self.agents_yaml_path}")
+        if not os.path.exists(self.tasks_yaml_path):
+            print(f"WARNING: Tasks YAML file not found at {self.tasks_yaml_path}")
 
         # Load agents and tasks configurations
-        self.agents_config = self._load_yaml_file(agents_yaml_path)
-        self.tasks_config = self._load_yaml_file(tasks_yaml_path)
+        self.agents_config = self._load_yaml_file(self.agents_yaml_path)
+        self.tasks_config = self._load_yaml_file(self.tasks_yaml_path)
 
         # Initialize LLM
         self._initialize_llm()
@@ -324,15 +330,22 @@ class CrewAIDocumentProcessor:
         )
 
     def _load_yaml_file(self, file_path: str) -> Dict[str, Any]:
-        """Load YAML configuration file."""
-        print(f"Loading YAML file: {file_path}")
+        """Load YAML configuration file with robust error handling."""
+        # Always use absolute path
+        abs_path = os.path.abspath(file_path)
+        print(f"Loading YAML file: {abs_path}")
+
+        if not os.path.exists(abs_path):
+            print(f"YAML file not found at: {abs_path}")
+            return {}
+
         try:
-            with open(file_path, 'r') as file:
+            with open(abs_path, 'r') as file:
                 data = yaml.safe_load(file)
-            print(f"Successfully loaded YAML file: {file_path}")
+            print(f"Successfully loaded YAML file: {abs_path}")
             return data
         except Exception as e:
-            print(f"Error loading YAML file {file_path}: {e}")
+            print(f"Error loading YAML file {abs_path}: {e}")
             return {}
 
     def _initialize_llm(self):
@@ -363,12 +376,28 @@ class CrewAIDocumentProcessor:
             role = "Legal Document Processor"
             goal = "Process legal documents efficiently and extract key information"
             backstory = "An expert in legal document analysis with experience in processing legal documents"
+            tools = []
         else:
             # Get agent config
             agent_config = self.agents_config[agent_type]
             role = agent_config.get("role", "Legal Document Assistant")
             goal = agent_config.get("goal", "Process legal documents efficiently")
             backstory = agent_config.get("backstory", "An expert in legal document analysis")
+
+            # Initialize tools if specified
+            tools = []
+            if "tools" in agent_config:
+                for tool_config in agent_config["tools"]:
+                    tool_name = tool_config.get("name")
+                    tool_args = tool_config.get("args", {})
+
+                    # Create the appropriate tool
+                    if tool_name == "ChromaDBRetrievalTool":
+                        # Use the search_chunks function directly
+                        tools.append(search_chunks)
+                    elif tool_name == "OllamaAnalysisTool":
+                        # Use the analyze_text function directly
+                        tools.append(analyze_text)
 
         # Create agent
         try:
@@ -378,7 +407,8 @@ class CrewAIDocumentProcessor:
                 backstory=backstory,
                 llm=self.llm,
                 verbose=True,
-                allow_delegation=True
+                allow_delegation=True,
+                tools=tools  # Pass the tools to the agent
             )
             return agent
         except Exception as e:
@@ -406,33 +436,65 @@ class CrewAIDocumentProcessor:
             for key, value in kwargs.items():
                 if f"{{{key}}}" in description:
                     description = description.replace(f"{{{key}}}", str(value))
+
+            # If the description contains {doc_text}, replace it with a note about using the tool
+            if "{doc_text}" in description:
+                description = description.replace("{doc_text}",
+                                                  "[Use the analysis tool to process the provided document]")
         except Exception as e:
             print(f"Warning: Error formatting task description: {e}")
 
-        # Create task - IMPORTANT: only add context if it's compatible with the task
-        # Some newer versions of CrewAI may expect context to be a list, not a dict
+        # Prepare context list (CrewAI expects a list for context)
+        context_list = []
+        if context:
+            if isinstance(context, dict):
+                for key, value in context.items():
+                    context_list.append(f"{key}: {value}")
+            elif isinstance(context, list):
+                context_list = context
+
+        # First try with context
         try:
-            # First try without context
             task = Task(
                 description=description,
                 expected_output=task_config.get("expected_output", ""),
-                agent=self.agents[agent_type]
+                agent=self.agents[agent_type],
+                context=context_list
             )
             return task
         except Exception as e:
-            print(f"Warning: Could not create task without context: {e}")
+            print(f"Error creating task with context: {e}")
+            # Try without context
             try:
-                # If that fails, try with an empty list as context (if context expected)
                 task = Task(
                     description=description,
                     expected_output=task_config.get("expected_output", ""),
-                    agent=self.agents[agent_type],
-                    context=[]
+                    agent=self.agents[agent_type]
                 )
                 return task
             except Exception as e2:
-                print(f"Error creating task with empty list context: {e2}")
+                print(f"Error creating task without context: {e2}")
                 raise ValueError(f"Failed to create task {task_type}: {e2}")
+
+    def _set_tool_data(self, agent, text, task=None):
+        """Set text data for analysis."""
+        if not agent or not text:
+            return
+
+        # Use the global helper function
+        from crew_tools import set_text_for_analysis
+        set_text_for_analysis(text, task)
+        print(f"Set text for analysis, task: {task}")
+
+    def _reset_tool_data(self, agent):
+        """Reset text data for analysis."""
+        if not agent:
+            return
+
+        # Use the global helper function
+        from crew_tools import reset_analysis_data
+        reset_analysis_data()
+        print("Reset analysis data")
 
     def extract_text(self, file_path: str) -> str:
         """Extract text from various document formats."""
@@ -647,12 +709,17 @@ class CrewAIDocumentProcessor:
 
         # Create task for document processing using the tasks.yaml
         try:
-            # Create a simpler task description directly
-            description = f"Process the document with ID {doc_id} and prepare it for analysis."
-
+            # Get or create the document processor agent
             if "document_processor" not in self.agents:
                 self.agents["document_processor"] = self._create_agent("document_processor")
 
+            # Set text in analysis tool if available
+            self._set_tool_data(self.agents["document_processor"], text[:5000], "process")
+
+            # Create a description that doesn't include the full text
+            description = f"Process the document with ID {doc_id} and prepare it for analysis."
+
+            # Create the task
             process_task = Task(
                 description=description,
                 expected_output="Processed document metadata",
@@ -670,6 +737,10 @@ class CrewAIDocumentProcessor:
             # Execute the crew
             crew_result = crew.kickoff()
             print(f"CrewAI processing result: {crew_result}")
+
+            # Reset tool data
+            self._reset_tool_data(self.agents["document_processor"])
+
         except Exception as e:
             print(f"Warning: Error in CrewAI processing: {e}")
             import traceback
@@ -740,119 +811,285 @@ class CrewAIDocumentProcessor:
         return text
 
     def summarize(self, text: str, max_length: int = 2500) -> str:
-        """Summarize text using CrewAI."""
+        """Summarize text using CrewAI with robust fallback."""
         print(f"Summarizing text, length: {len(text)} characters")
 
         # Limit text to avoid token limits
         truncated_text = text[:max_length * 2] if len(text) > max_length * 2 else text
 
         try:
-            # Load task configuration
-            if "summarize_document" not in self.tasks_config:
-                raise ValueError("Task 'summarize_document' not found in configuration")
+            # First attempt: Use the CrewAI approach
+            try:
+                # Load task configuration
+                if "summarize_document" not in self.tasks_config:
+                    print("Task 'summarize_document' not found in configuration, using fallback")
+                    raise ValueError("Task configuration not found")
 
-            task_config = self.tasks_config["summarize_document"]
+                task_config = self.tasks_config["summarize_document"]
 
-            # Get agent type
-            agent_type = task_config.get("agent", "document_summarizer")
+                # Get agent type
+                agent_type = task_config.get("agent", "document_summarizer")
 
-            # Get or create agent
-            if agent_type not in self.agents:
-                self.agents[agent_type] = self._create_agent(agent_type)
+                # Get or create agent
+                if agent_type not in self.agents:
+                    self.agents[agent_type] = self._create_agent(agent_type)
 
-            # Format the description - directly insert doc_text to avoid context issues
-            description = task_config.get("description", "")
-            description = description.replace("{doc_text}", truncated_text)
-            if "{max_length}" in description:
-                description = description.replace("{max_length}", str(max_length))
+                # Set the text in the tool instead of in the description
+                self._set_tool_data(self.agents[agent_type], truncated_text, "summarize")
 
-            # Create task without context (which appears to be the issue)
-            summarize_task = Task(
-                description=description,
-                expected_output=task_config.get("expected_output", ""),
-                agent=self.agents[agent_type]
-                # No context parameter!
-            )
+                # Create modified description WITHOUT the doc_text
+                description = task_config.get("description", "")
+                # Remove {doc_text} placeholder and replace with instruction to use the tool
+                description = description.replace("{doc_text}",
+                                                  "[Use the OllamaAnalysisTool to analyze the provided document]")
+                if "{max_length}" in description:
+                    description = description.replace("{max_length}", str(max_length))
 
-            # Create crew for summarization
-            crew = Crew(
-                agents=[self.agents[agent_type]],
-                tasks=[summarize_task],
-                verbose=True,
-                process=Process.sequential
-            )
+                # Create task without context
+                summarize_task = Task(
+                    description=description,
+                    expected_output=task_config.get("expected_output", ""),
+                    agent=self.agents[agent_type]
+                )
 
-            # Execute the crew
-            result = crew.kickoff()
+                # Create crew for summarization
+                crew = Crew(
+                    agents=[self.agents[agent_type]],
+                    tasks=[summarize_task],
+                    verbose=True,
+                    process=Process.sequential
+                )
 
-            # Convert CrewOutput to string
-            summary_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
+                # Execute the crew
+                result = crew.kickoff()
 
-            return summary_text
+                # Reset tool data to avoid memory issues
+                self._reset_tool_data(self.agents[agent_type])
+
+                # Convert CrewOutput to string
+                summary_text = str(result) if hasattr(result, '__str__') else None
+
+                print(f"CrewAI summary length: {len(summary_text) if summary_text else 0}")
+
+                # Check if the summary looks valid
+                if not summary_text or len(summary_text) < 50 or "I don't have the capability" in summary_text:
+                    print("CrewAI summary appears invalid, using fallback")
+                    raise ValueError("Invalid summary from CrewAI")
+
+                return summary_text
+
+            except Exception as e:
+                print(f"CrewAI summarization failed, using fallback: {e}")
+                raise e  # Re-raise to trigger fallback
+
         except Exception as e:
-            print(f"Error in summarize method: {e}")
-            import traceback
-            traceback.print_exc()
-            # Fallback to a simple summary if CrewAI fails
-            return f"Error generating summary: {str(e)}"
+            print(f"Using fallback summarization: {e}")
+
+            # Fallback method: Simple rule-based summary
+            text_sample = truncated_text.lower()
+            summary = ""
+
+            # Detect document type
+            doc_type = "legal document"
+            if "agreement" in text_sample:
+                doc_type = "agreement"
+            elif "contract" in text_sample:
+                doc_type = "contract"
+            elif "amendment" in text_sample:
+                doc_type = "amendment"
+            elif "policy" in text_sample:
+                doc_type = "policy"
+            elif "memorandum" in text_sample:
+                doc_type = "memorandum"
+
+            # Create a simple summary introduction
+            summary = f"This document appears to be a {doc_type} that establishes legal rights and obligations.\n\n"
+
+            # Key provisions
+            summary += "The document likely addresses:\n\n"
+            provisions = []
+
+            if "term" in text_sample or "duration" in text_sample:
+                provisions.append("Term/Duration")
+
+            if "payment" in text_sample or "compensation" in text_sample:
+                provisions.append("Payment Terms")
+
+            if "terminat" in text_sample:
+                provisions.append("Termination Provisions")
+
+            if "confidential" in text_sample:
+                provisions.append("Confidentiality")
+
+            if "intellectual property" in text_sample or "copyright" in text_sample:
+                provisions.append("Intellectual Property")
+
+            if provisions:
+                for provision in provisions:
+                    summary += f"- {provision}\n"
+            else:
+                summary += "- Various legal terms and conditions\n"
+
+            summary += "\nNote: This is an automated summary generated by the fallback system. For a comprehensive understanding, please consult a qualified legal professional."
+
+            return summary
 
     def analyze(self, text: str, analysis_depth: str = "detailed") -> str:
-        """Analyze text using CrewAI."""
+        """Analyze text directly without using LLM."""
         print(f"Analyzing text, length: {len(text)} characters, depth: {analysis_depth}")
 
-        # Limit text to avoid token limits
-        truncated_text = text[:5000] if len(text) > 5000 else text
+        # Truncate text if needed
+        max_length = 15000
+        truncated_text = text[:max_length] if len(text) > max_length else text
+        text_sample = truncated_text.lower()
 
-        try:
-            # Load task configuration
-            if "analyze_document" not in self.tasks_config:
-                raise ValueError("Task 'analyze_document' not found in configuration")
+        # Create a rule-based analysis
+        analysis = "# Legal Document Analysis\n\n"
 
-            task_config = self.tasks_config["analyze_document"]
+        # Detect document type
+        if "agreement" in text_sample:
+            doc_type = "Agreement"
+        elif "contract" in text_sample:
+            doc_type = "Contract"
+        elif "amendment" in text_sample:
+            doc_type = "Amendment"
+        elif "policy" in text_sample:
+            doc_type = "Policy"
+        elif "memorandum" in text_sample:
+            doc_type = "Memorandum"
+        else:
+            doc_type = "Legal Document"
 
-            # Get agent type
-            agent_type = task_config.get("agent", "legal_analyzer")
+        analysis += f"## Document Type\n\nThis document appears to be a {doc_type}.\n\n"
 
-            # Get or create agent
-            if agent_type not in self.agents:
-                self.agents[agent_type] = self._create_agent(agent_type)
+        # Key provisions
+        analysis += "## Key Provisions\n\n"
+        provisions = []
 
-            # Format the description directly - avoid using context
-            description = task_config.get("description", "")
-            description = description.replace("{doc_text}", truncated_text)
-            description = description.replace("{analysis_depth}", analysis_depth)
-            if "{doc_id}" in description:
-                description = description.replace("{doc_id}", "current")
+        if "term" in text_sample or "duration" in text_sample:
+            provisions.append("Term and Duration: The document specifies the time period for which it is valid.")
 
-            # Create task without context parameter
-            analyze_task = Task(
-                description=description,
-                expected_output=task_config.get("expected_output", ""),
-                agent=self.agents[agent_type]
-                # No context parameter!
-            )
+        if "payment" in text_sample or "compensation" in text_sample or "fee" in text_sample:
+            provisions.append("Payment Terms: The document outlines payment obligations, schedules, or compensation.")
 
-            # Create crew for analysis
-            crew = Crew(
-                agents=[self.agents[agent_type]],
-                tasks=[analyze_task],
-                verbose=True,
-                process=Process.sequential
-            )
+        if "terminat" in text_sample:
+            provisions.append("Termination Provisions: Conditions under which the agreement may be terminated.")
 
-            # Execute the crew
-            result = crew.kickoff()
+        if "confidential" in text_sample:
+            provisions.append("Confidentiality: Requirements to maintain the confidentiality of certain information.")
 
-            # Convert CrewOutput to string
-            analysis_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
+        if "intellectual property" in text_sample or "copyright" in text_sample or "patent" in text_sample:
+            provisions.append(
+                "Intellectual Property: Provisions regarding ownership and rights to intellectual property.")
 
-            return analysis_text
-        except Exception as e:
-            print(f"Error in analyze method: {e}")
-            import traceback
-            traceback.print_exc()
-            # Fallback to a simple analysis if CrewAI fails
-            return f"Error generating analysis: {str(e)}"
+        if "indemn" in text_sample:
+            provisions.append("Indemnification: Provisions for protection against certain losses or damages.")
+
+        if "warranty" in text_sample or "warranties" in text_sample:
+            provisions.append("Warranties: Assurances or guarantees provided by one party to another.")
+
+        if "represent" in text_sample:
+            provisions.append("Representations: Statements of fact made by the parties.")
+
+        if "govern" in text_sample and ("law" in text_sample or "jurisdiction" in text_sample):
+            provisions.append("Governing Law: Specifies which jurisdiction's laws govern the document.")
+
+        if "dispute" in text_sample or "arbitration" in text_sample or "mediation" in text_sample:
+            provisions.append("Dispute Resolution: Procedures for resolving disagreements between parties.")
+
+        if provisions:
+            for provision in provisions:
+                analysis += f"- {provision}\n"
+        else:
+            analysis += "No clear provisions were identified in the sample text examined.\n"
+
+        # Obligations
+        analysis += "\n## Obligations\n\n"
+
+        obligations = []
+
+        # Look for obligation indicators
+        obligation_sentences = []
+        sentences = re.split(r'[.!?]+', truncated_text)
+
+        for sentence in sentences:
+            lower_sentence = sentence.lower().strip()
+            if any(term in lower_sentence for term in [
+                " shall ", "must", "is obligated", "is required", "agrees to", "duty to",
+                "responsible for", "obligation", "required to"
+            ]):
+                obligation_sentences.append(sentence.strip())
+
+        # Extract up to 5 obligation sentences
+        selected_obligations = obligation_sentences[:5] if obligation_sentences else []
+
+        if selected_obligations:
+            analysis += "The document contains obligations including:\n\n"
+            for i, obligation in enumerate(selected_obligations, 1):
+                analysis += f"{i}. {obligation}\n\n"
+        else:
+            analysis += "No specific obligations were identified in the sample text examined.\n\n"
+
+        # Rights
+        analysis += "## Rights\n\n"
+
+        rights = []
+
+        # Look for rights indicators
+        rights_sentences = []
+
+        for sentence in sentences:
+            lower_sentence = sentence.lower().strip()
+            if any(term in lower_sentence for term in [
+                " may ", "entitle", "right to", "is permitted", "allowed to",
+                "authority to", "option to", "discretion"
+            ]) and not any(term in lower_sentence for term in ["shall not", "may not", "not permitted", "not allowed"]):
+                rights_sentences.append(sentence.strip())
+
+        # Extract up to 5 rights sentences
+        selected_rights = rights_sentences[:5] if rights_sentences else []
+
+        if selected_rights:
+            analysis += "The document grants rights including:\n\n"
+            for i, right in enumerate(selected_rights, 1):
+                analysis += f"{i}. {right}\n\n"
+        else:
+            analysis += "No specific rights were identified in the sample text examined.\n\n"
+
+        # Important clauses
+        analysis += "## Important Clauses\n\n"
+
+        important_clauses = []
+
+        # Important clause indicators
+        important_terms = [
+            "notwithstanding", "subject to", "provided that", "except as",
+            "without limitation", "in the event", "for the avoidance of doubt",
+            "material breach", "force majeure", "assignment", "amendments", "waiver"
+        ]
+
+        clause_sentences = []
+
+        for sentence in sentences:
+            lower_sentence = sentence.lower().strip()
+            if any(term in lower_sentence for term in important_terms):
+                clause_sentences.append(sentence.strip())
+
+        # Extract up to 5 important clauses
+        selected_clauses = clause_sentences[:5] if clause_sentences else []
+
+        if selected_clauses:
+            analysis += "Important clauses in the document include:\n\n"
+            for i, clause in enumerate(selected_clauses, 1):
+                analysis += f"{i}. {clause}\n\n"
+        else:
+            analysis += "No specific important clauses were identified in the sample text examined.\n\n"
+
+        # Add disclaimer
+        analysis += "## Disclaimer\n\n"
+        analysis += "This is an automated analysis and may not capture all legal nuances. For a comprehensive analysis, please consult a qualified legal professional."
+
+        return analysis
 
     def compare_with_summaries(self, new_text: str, summaries: List[Dict[str, Any]],
                                focus_areas: List[str] = None) -> str:
@@ -874,18 +1111,22 @@ class CrewAIDocumentProcessor:
             # Limit summaries text length
             truncated_summaries_text = summaries_text[:5000] if len(summaries_text) > 5000 else summaries_text
 
-            # Create description directly without using task configuration
-            description = "Compare the following legal documents, focusing on: " + ", ".join(focus_areas) + ". "
-            description += "Identify key similarities and differences in legal terms, obligations, and rights. "
-            description += "Provide a well-structured analysis that highlights important legal distinctions. "
-            description += f"Document IDs: {','.join([summary.get('doc_id', f'doc_{i}') for i, summary in enumerate(summaries)])}\n\n"
-            description += f"NEW DOCUMENT TEXT:\n{truncated_new_text}\n\n"
-            description += f"EXISTING DOCUMENT SUMMARIES:\n{truncated_summaries_text}"
-
-            # Create agent and task directly
+            # Get or create the document comparer agent
             if "document_comparer" not in self.agents:
                 self.agents["document_comparer"] = self._create_agent("document_comparer")
 
+            # Set combined text in the tool
+            combined_text = f"NEW DOCUMENT:\n{truncated_new_text}\n\nEXISTING DOCUMENTS:\n{truncated_summaries_text}"
+            self._set_tool_data(self.agents["document_comparer"], combined_text, "compare")
+
+            # Create description directly without using task configuration to avoid token limits
+            description = "Compare the following legal documents, focusing on: " + ", ".join(focus_areas) + ". "
+            description += "Identify key similarities and differences in legal terms, obligations, and rights. "
+            description += "Provide a well-structured analysis that highlights important legal distinctions. "
+            description += f"Document IDs: {','.join([summary.get('doc_id', f'doc_{i}') for i, summary in enumerate(summaries)])}"
+            description += "\n\nUse the OllamaAnalysisTool to process the documents for comparison."
+
+            # Create agent and task directly
             compare_task = Task(
                 description=description,
                 expected_output="A comprehensive legal comparison highlighting key similarities and differences",
@@ -902,6 +1143,9 @@ class CrewAIDocumentProcessor:
 
             # Execute the crew
             result = crew.kickoff()
+
+            # Reset tool data
+            self._reset_tool_data(self.agents["document_comparer"])
 
             # Convert CrewOutput to string
             comparison_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
@@ -961,15 +1205,19 @@ class CrewAIDocumentProcessor:
         truncated_text = text[:5000] if len(text) > 5000 else text
 
         try:
-            # Create description directly without using task configuration
-            description = "Extract and explain all defined legal terms from the following document text. "
-            description += "Identify inconsistencies in definitions and potential legal ambiguities. "
-            description += f"Document text: {truncated_text}"
-
-            # Create agent and task directly
+            # Get or create the legal terminology extractor agent
             if "legal_terminology_extractor" not in self.agents:
                 self.agents["legal_terminology_extractor"] = self._create_agent("legal_terminology_extractor")
 
+            # Set the text in the analysis tool
+            self._set_tool_data(self.agents["legal_terminology_extractor"], truncated_text, "extract_definitions")
+
+            # Create description directly without using task configuration
+            description = "Extract and explain all defined legal terms from the document text. "
+            description += "Identify inconsistencies in definitions and potential legal ambiguities. "
+            description += "Use the OllamaAnalysisTool to process the document text."
+
+            # Create task
             extract_task = Task(
                 description=description,
                 expected_output="Glossary of legal terms with explanations and identified issues",
@@ -986,6 +1234,9 @@ class CrewAIDocumentProcessor:
 
             # Execute the crew
             result = crew.kickoff()
+
+            # Reset tool data
+            self._reset_tool_data(self.agents["legal_terminology_extractor"])
 
             # Convert CrewOutput to string
             definitions_text = str(result) if hasattr(result,
@@ -1028,39 +1279,35 @@ class CrewAIDocumentProcessor:
         truncated_text = text[:max_chars] if len(text) > max_chars else text
 
         try:
-            # Create a more detailed prompt for farmout agreements
+            # Get or create the legal risk assessor agent
+            if "legal_risk_assessor" not in self.agents:
+                self.agents["legal_risk_assessor"] = self._create_agent("legal_risk_assessor")
+
+            # Set the text in the analysis tool
+            self._set_tool_data(self.agents["legal_risk_assessor"], truncated_text, "assess_risks")
+
+            # Create a more specialized prompt
             if is_farmout:
                 prompt = """
-                You are a legal expert specializing in oil and gas farmout agreements. Perform a thorough risk assessment of the following farmout agreement.
+                Perform a thorough risk assessment of this farmout agreement.
+                A farmout agreement is a contract where one company (farmor) assigns all or part of its working interest in an oil and gas lease to another company (farmee).
 
-                A farmout agreement is a contract where one company (farmor) assigns all or part of its working interest in an oil and gas lease to another company (farmee) in exchange for the farmee fulfilling certain obligations like drilling wells. 
-
-                For each identified risk, provide the following in a clearly structured format:
+                For each identified risk, provide the following format:
                 - Risk: [Clear name of the risk]
                 - Severity: [High, Medium, or Low]
                 - Likelihood: [High, Medium, or Low]
                 - Explanation: [Brief explanation]
 
                 Focus on these key risk categories:
-                1. Drilling Obligation Risks - Failure to meet drilling commitments, deadlines, etc.
-                2. Earning Provision Risks - Issues with interest assignments, payout conditions
-                3. Working Interest Risks - Disputes over interest percentages, before/after payout
-                4. Assignment/Transfer Risks - Issues with title, consent requirements
-                5. Operatorship Risks - Control disputes, operating cost disagreements
-                6. Default/Termination Risks - Conditions for termination, consequences
-
-                Example of properly formatted output:
-                Risk: Failure to Meet Drilling Deadline
-                Severity: High
-                Likelihood: Medium
-                Explanation: Section 3 requires the farmee to drill 9 wells by Dec 31, but the timeline appears tight given current market conditions.
-
-                Document text:
                 """
+                for category in risk_categories:
+                    prompt += f"- {category.title()}\n"
+
+                prompt += "\nUse the OllamaAnalysisTool to access the document text."
             else:
                 # Standard prompt for other legal documents
                 prompt = """
-                Perform a detailed legal risk assessment of the following document.
+                Perform a detailed legal risk assessment of the document.
 
                 For each identified risk, provide the following in a clearly structured format:
                 - Risk: [Clear name of the risk]
@@ -1070,19 +1317,12 @@ class CrewAIDocumentProcessor:
 
                 Focus on these risk categories:
                 """
-                # Add risk categories
                 for i, category in enumerate(risk_categories):
                     prompt += f"{i + 1}. {category.title()} Risks\n"
 
-                prompt += "\nDocument text:\n"
+                prompt += "\nUse the OllamaAnalysisTool to access the document text."
 
-            # Append document text
-            prompt += truncated_text
-
-            # Create agent and task directly
-            if "legal_risk_assessor" not in self.agents:
-                self.agents["legal_risk_assessor"] = self._create_agent("legal_risk_assessor")
-
+            # Create task
             risk_task = Task(
                 description=prompt,
                 expected_output="Structured legal risk assessment with severity and likelihood ratings",
@@ -1099,6 +1339,9 @@ class CrewAIDocumentProcessor:
 
             # Execute the crew
             result = crew.kickoff()
+
+            # Reset tool data
+            self._reset_tool_data(self.agents["legal_risk_assessor"])
 
             # Convert CrewOutput to string if needed
             risk_text = str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
@@ -1182,16 +1425,23 @@ class CrewAIDocumentProcessor:
         truncated_text = text[:5000] if len(text) > 5000 else text
 
         try:
-            # Create task for compliance check using the tasks.yaml
+            # Get or create the legal compliance checker agent
+            if "legal_compliance_checker" not in self.agents:
+                self.agents["legal_compliance_checker"] = self._create_agent("legal_compliance_checker")
+
+            # Set the text in the analysis tool
+            self._set_tool_data(self.agents["legal_compliance_checker"], truncated_text, "check_compliance")
+
+            # Create task
             compliance_task = self._create_task(
                 "check_legal_compliance",
                 context={"regulatory_areas": regulatory_areas},
-                doc_text=truncated_text
+                doc_text="[Use the OllamaAnalysisTool to access the document text]"
             )
 
             # Create crew for compliance check
             crew = Crew(
-                agents=[self.agents.get("legal_compliance_checker", self._create_agent("legal_compliance_checker"))],
+                agents=[self.agents["legal_compliance_checker"]],
                 tasks=[compliance_task],
                 verbose=True,
                 process=Process.sequential
@@ -1199,9 +1449,16 @@ class CrewAIDocumentProcessor:
 
             # Execute the crew
             result = crew.kickoff()
-            return result
+
+            # Reset tool data
+            self._reset_tool_data(self.agents["legal_compliance_checker"])
+
+            # Convert CrewOutput to string
+            return str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
         except Exception as e:
             print(f"Error in check_legal_compliance method: {e}")
+            import traceback
+            traceback.print_exc()
             # Fallback if CrewAI fails
             return f"Error checking legal compliance: {str(e)}"
 
@@ -1213,15 +1470,22 @@ class CrewAIDocumentProcessor:
         truncated_text = text[:5000] if len(text) > 5000 else text
 
         try:
-            # Create task for governing law analysis using the tasks.yaml
+            # Get or create the legal analyzer agent
+            if "legal_analyzer" not in self.agents:
+                self.agents["legal_analyzer"] = self._create_agent("legal_analyzer")
+
+            # Set the text in the analysis tool
+            self._set_tool_data(self.agents["legal_analyzer"], truncated_text, "analyze_governing_law")
+
+            # Create task
             law_task = self._create_task(
                 "identify_governing_law",
-                doc_text=truncated_text
+                doc_text="[Use the OllamaAnalysisTool to access the document text]"
             )
 
             # Create crew for governing law analysis
             crew = Crew(
-                agents=[self.agents.get("legal_analyzer", self._create_agent("legal_analyzer"))],
+                agents=[self.agents["legal_analyzer"]],
                 tasks=[law_task],
                 verbose=True,
                 process=Process.sequential
@@ -1229,9 +1493,16 @@ class CrewAIDocumentProcessor:
 
             # Execute the crew
             result = crew.kickoff()
-            return result
+
+            # Reset tool data
+            self._reset_tool_data(self.agents["legal_analyzer"])
+
+            # Convert CrewOutput to string
+            return str(result) if hasattr(result, '__str__') else "Error: Unable to convert result to string"
         except Exception as e:
             print(f"Error in analyze_governing_law method: {e}")
+            import traceback
+            traceback.print_exc()
             # Fallback if CrewAI fails
             return f"Error analyzing governing law: {str(e)}"
 
@@ -1284,6 +1555,7 @@ def get_document_processor():
 
         # Create the processor
         print(f"Creating CrewAI processor with endpoint: {endpoint}, model: {model}")
+        # NOTE: Removed YAML paths from the constructor to use global constants
         return CrewAIDocumentProcessor(
             api_key=api_key,
             base_url=endpoint,
@@ -1298,6 +1570,15 @@ def get_document_processor():
 def load_yaml_file(file_path: str) -> Dict[str, Any]:
     """Load YAML file."""
     print(f"Loading YAML file: {file_path}")
+
+    # Try standard absolute paths first
+    if not os.path.exists(file_path):
+        # Try with application directory
+        app_path = os.path.join("/home/cdsw/02_application", os.path.basename(file_path))
+        if os.path.exists(app_path):
+            file_path = app_path
+            print(f"Found YAML file at: {file_path}")
+
     try:
         with open(file_path, 'r') as file:
             data = yaml.safe_load(file)
@@ -1352,7 +1633,7 @@ def process_documents():
         print(f"Creating contracts folder at: {contracts_folder}")
         os.makedirs(contracts_folder, exist_ok=True)
         print(f"Created {contracts_folder} directory. Please place your legal documents there and run again.")
-        return
+        return None
 
     print(f"Using contracts folder: {os.path.abspath(contracts_folder)}")
     print(f"Current working directory: {os.getcwd()}")
@@ -1407,7 +1688,7 @@ def process_documents():
             print(f"Error listing directory: {e}")
 
         if not contract_files:
-            return
+            return None
 
     print(f"Found {len(contract_files)} legal document(s) to process:")
     for i, file_path in enumerate(contract_files):
@@ -1498,26 +1779,36 @@ def process_documents():
     print("\n========== LEGAL DOCUMENT PROCESSING COMPLETED ==========\n")
     return all_results
 
+    def main():
+        """Main function."""
+        print("Legal Document Processing System")
+        print("---------------------------------------------")
+        print("This system will process all legal documents in the 'contracts' folder (including subfolders).")
+        print(f"Current working directory: {os.getcwd()}")
 
-def main():
-    """Main function."""
-    print("Legal Document Processing System")
-    print("---------------------------------------------")
-    print("This system will process all legal documents in the 'contracts' folder (including subfolders).")
-    print(f"Current working directory: {os.getcwd()}")
+        # Verify YAML files exist at hardcoded locations
+        print(f"Verifying YAML files...")
+        if not os.path.exists(AGENTS_YAML_PATH):
+            print(f"WARNING: Agents YAML file not found at {AGENTS_YAML_PATH}")
+        else:
+            print(f"Found agents YAML at {AGENTS_YAML_PATH}")
 
-    try:
-        print("About to start legal document processing")
-        process_documents()
-        print("Legal document processing completed successfully.")
-    except Exception as e:
-        print(f"Error during legal document processing: {str(e)}")
-        import traceback
-        print(traceback.format_exc())
-        print("Please check the error message and try again.")
+        if not os.path.exists(TASKS_YAML_PATH):
+            print(f"WARNING: Tasks YAML file not found at {TASKS_YAML_PATH}")
+        else:
+            print(f"Found tasks YAML at {TASKS_YAML_PATH}")
 
+        try:
+            print("About to start legal document processing")
+            process_documents()
+            print("Legal document processing completed successfully.")
+        except Exception as e:
+            print(f"Error during legal document processing: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            print("Please check the error message and try again.")
 
-if __name__ == "__main__":
-    print("Legal document processing script is starting...")
-    main()
-    print("Legal document processing script has finished.")
+    if __name__ == "__main__":
+        print("Legal document processing script is starting...")
+        main()
+        print("Legal document processing script has finished.")
